@@ -3,51 +3,10 @@
 //  VoiceKeyboard
 //
 //  Maps RecognitionLanguage to provider-specific language codes and hints.
+//  RecognitionLanguage enum is defined in SettingsStore.swift (shared file).
 //
 
 import Foundation
-
-// MARK: - Recognition Language
-
-enum RecognitionLanguage: String, CaseIterable, Identifiable, Codable {
-    case zhCN  = "zh-CN"    // 普通话
-    case zhYue = "zh-Yue"   // 粤语
-    case en    = "en"       // English
-    case es    = "es"       // Spanish
-    case pt    = "pt"       // Portuguese
-    case fr    = "fr"       // French
-    case de    = "de"       // German
-    case ja    = "ja"       // Japanese
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .zhCN:  return "中文普通话"
-        case .zhYue: return "粤语"
-        case .en:    return "English"
-        case .es:    return "Español"
-        case .pt:    return "Português"
-        case .fr:    return "Français"
-        case .de:    return "Deutsch"
-        case .ja:    return "日本語"
-        }
-    }
-
-    /// Short label for keyboard button display.
-    var shortLabel: String {
-        switch self {
-        case .zhCN:  return "中"
-        case .zhYue: return "粤"
-        case .en:    return "EN"
-        case .es:    return "ES"
-        case .pt:    return "PT"
-        case .fr:    return "FR"
-        case .de:    return "DE"
-        case .ja:    return "日"
-        }
-    }
-}
 
 // MARK: - Provider-specific mappings
 
