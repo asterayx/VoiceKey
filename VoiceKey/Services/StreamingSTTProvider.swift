@@ -1,6 +1,6 @@
 //
 //  StreamingSTTProvider.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Provider-agnostic protocol for streaming speech-to-text services.
 //  Supports both WebSocket-streaming (Soniox) and REST-based (Groq, Cerebras)

@@ -1,6 +1,6 @@
 //
 //  SonioxStreamingService.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Created by Peng Chen on 28/3/26.
 //

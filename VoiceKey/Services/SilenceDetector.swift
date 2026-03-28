@@ -1,6 +1,6 @@
 //
 //  SilenceDetector.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Monitors PCM audio energy (RMS) and detects silence.
 //  Fires a callback after a configurable duration of continuous silence.

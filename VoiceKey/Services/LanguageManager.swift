@@ -1,6 +1,6 @@
 //
 //  LanguageManager.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Maps RecognitionLanguage to provider-specific language codes and hints.
 //  RecognitionLanguage enum is defined in SettingsStore.swift (shared file).

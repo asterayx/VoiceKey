@@ -1,6 +1,6 @@
 //
 //  STTProviderFactory.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Factory that instantiates the correct StreamingSTTProvider based on
 //  the user's selected engine in SettingsStore.

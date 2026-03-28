@@ -1,6 +1,6 @@
 //
 //  AudioBufferWriter.swift
-//  VoiceKeyboard
+//  VoiceKey
 //
 //  Converts accumulated PCM Int16 mono chunks into a WAV-format Data blob.
 //  Used by REST-based ASR providers (Groq, Cerebras) that require file upload.
