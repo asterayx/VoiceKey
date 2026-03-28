@@ -4,16 +4,25 @@
 //
 //  Created by Peng Chen on 28/3/26.
 //
-//  Full QWERTY keyboard supporting English and Chinese Pinyin input.
+//  Full keyboard supporting English, Chinese Pinyin, number, and symbol modes.
 //
-//  Key rows:
+//  Letter mode:
 //  Row 0:  q  w  e  r  t  y  u  i  o  p
 //  Row 1:   a  s  d  f  g  h  j  k  l
 //  Row 2:  ⇧  z  x  c  v  b  n  m  ⌫
-//  Row 3:  🌐  123  中/EN  ──space──  🎤  ⏎
+//  Row 3:  🌐  123  Lang  ──space──  ✏️  🎤  ⏎
 //
-//  In Chinese mode, typed letters accumulate in a Pinyin buffer and
-//  are shown in CandidateBarView. Selecting a candidate clears the buffer.
+//  Number mode:
+//  Row 0:  1  2  3  4  5  6  7  8  9  0
+//  Row 1:  -  /  :  ;  (  )  $  &  @  "
+//  Row 2:  #+=  .  ,  ?  !  '  ⌫
+//  Row 3:  🌐  ABC  Lang  ──space──  ✏️  🎤  ⏎
+//
+//  Symbol mode:
+//  Row 0:  [  ]  {  }  #  %  ^  *  +  =
+//  Row 1:  _  \  |  ~  <  >  €  £  ¥  •
+//  Row 2:  123  .  ,  ?  !  '  ⌫
+//  Row 3:  🌐  ABC  Lang  ──space──  ✏️  🎤  ⏎
 //
 
 import UIKit
@@ -21,21 +30,33 @@ import UIKit
 // MARK: - Key model
 
 enum KeyboardKey: Equatable {
-    case letter(String)      // "a"–"z"
-    case digit(String)       // "0"–"9" (number row, future)
+    case letter(String)
+    case digit(String)
+    case symbol(String)
     case space
     case `return`
     case delete
     case shift
     case nextKeyboard
-    case changeMode          // 123 toggle (reserved for M3)
-    case switchLanguage      // 中/EN
+    case changeMode       // 123 / ABC / #+= toggle
+    case switchLanguage
     case mic
+    case edit             // ✏️ edit mode button
 }
 
-enum KeyboardMode {
+enum KeyboardMode: Equatable {
     case english
     case chinesePinyin
+    case numbers
+    case symbols
+}
+
+// MARK: - Mic visual state
+
+enum MicVisualState {
+    case idle
+    case recording
+    case processing
 }
 
 // MARK: - Delegate
@@ -53,7 +74,7 @@ final class KeyboardView: UIView {
     // MARK: - State
 
     var mode: KeyboardMode = .english {
-        didSet { if oldValue != mode { refreshLanguageButton() } }
+        didSet { if oldValue != mode { rebuildKeyboard() } }
     }
 
     var isShifted: Bool = false {
@@ -64,30 +85,56 @@ final class KeyboardView: UIView {
         didSet { updateShiftButton() }
     }
 
-    var isRecording: Bool = false {
+    var micState: MicVisualState = .idle {
         didSet { updateMicButton() }
     }
 
-    var needsInputModeSwitchKey: Bool = false {
-        didSet { nextKeyboardButton.isHidden = !needsInputModeSwitchKey }
+    /// Kept for backward compat — maps to micState
+    var isRecording: Bool {
+        get { micState == .recording }
+        set { micState = newValue ? .recording : .idle }
     }
 
-    // MARK: - Rows layout
+    var needsInputModeSwitchKey: Bool = false {
+        didSet { nextKeyboardButton?.isHidden = !needsInputModeSwitchKey }
+    }
 
-    private static let row0Keys: [String] = ["q","w","e","r","t","y","u","i","o","p"]
-    private static let row1Keys: [String] = ["a","s","d","f","g","h","j","k","l"]
-    private static let row2Letters: [String] = ["z","x","c","v","b","n","m"]
+    /// Short label for the current language (displayed on lang button).
+    var currentLanguageLabel: String = "中" {
+        didSet { refreshLanguageButton() }
+    }
+
+    // MARK: - Layout data
+
+    private static let row0Letters = ["q","w","e","r","t","y","u","i","o","p"]
+    private static let row1Letters = ["a","s","d","f","g","h","j","k","l"]
+    private static let row2Letters = ["z","x","c","v","b","n","m"]
+
+    private static let row0Numbers = ["1","2","3","4","5","6","7","8","9","0"]
+    private static let row1Numbers = ["-","/",":",";","(",")","\u{0024}","&","@","\""]
+    private static let row2Numbers = [".",",","?","!","'"]
+
+    private static let row0Symbols = ["[","]","{","}","#","%","^","*","+","="]
+    private static let row1Symbols = ["_","\\","|","~","<",">","\u{20AC}","\u{00A3}","\u{00A5}","\u{2022}"]
+    private static let row2Symbols = [".",",","?","!","'"]
 
     // MARK: - Button references
 
-    private var letterButtons: [String: UIButton] = [:]   // keyed by lowercase letter
-    private var shiftButton:   UIButton!
-    private var deleteButton:  UIButton!
-    private var spaceButton:   UIButton!
-    private var returnButton:  UIButton!
-    private var micButton:     UIButton!
-    private var nextKeyboardButton: UIButton!
-    private var langButton:    UIButton!
+    private var letterButtons: [String: UIButton] = [:]
+    private var shiftButton: UIButton?
+    private var deleteButton: UIButton?
+    private var spaceButton: UIButton?
+    private var returnButton: UIButton?
+    private var micButton: UIButton?
+    private var nextKeyboardButton: UIButton?
+    private var langButton: UIButton?
+    private var modeButton: UIButton?
+    private var editButton: UIButton?
+
+    private var outerStack: UIStackView?
+
+    /// The mode to return to when leaving numbers/symbols
+    private var previousLetterMode: KeyboardMode = .english
 
     // MARK: - Init
 
@@ -97,85 +144,105 @@ final class KeyboardView: UIView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    // MARK: - Layout
+    // MARK: - Full rebuild
+
+    private func rebuildKeyboard() {
+        outerStack?.removeFromSuperview()
+        letterButtons.removeAll()
+        shiftButton = nil
+        deleteButton = nil
+        spaceButton = nil
+        returnButton = nil
+        micButton = nil
+        nextKeyboardButton = nil
+        langButton = nil
+        modeButton = nil
+        editButton = nil
+        deleteTimer?.invalidate()
+        deleteTimer = nil
+
+        buildLayout()
+    }
 
     private func buildLayout() {
         backgroundColor = .systemGroupedBackground
 
-        let outerStack = UIStackView()
-        outerStack.axis = .vertical
-        outerStack.spacing = 8
-        outerStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(outerStack)
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        outerStack = stack
 
         NSLayoutConstraint.activate([
-            outerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            outerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            outerStack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            outerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
 
-        outerStack.addArrangedSubview(makeRow0())
-        outerStack.addArrangedSubview(makeRow1())
-        outerStack.addArrangedSubview(makeRow2())
-        outerStack.addArrangedSubview(makeRow3())
+        switch mode {
+        case .english, .chinesePinyin:
+            stack.addArrangedSubview(makeLetterRow(Self.row0Letters))
+            stack.addArrangedSubview(makeLetterRow(Self.row1Letters, centered: true))
+            stack.addArrangedSubview(makeRow2Letters())
+            stack.addArrangedSubview(makeRow3())
+        case .numbers:
+            stack.addArrangedSubview(makeCharRow(Self.row0Numbers))
+            stack.addArrangedSubview(makeCharRow(Self.row1Numbers))
+            stack.addArrangedSubview(makeRow2NumSym(Self.row2Numbers, toggleLabel: "#+="))
+            stack.addArrangedSubview(makeRow3())
+        case .symbols:
+            stack.addArrangedSubview(makeCharRow(Self.row0Symbols))
+            stack.addArrangedSubview(makeCharRow(Self.row1Symbols))
+            stack.addArrangedSubview(makeRow2NumSym(Self.row2Symbols, toggleLabel: "123"))
+            stack.addArrangedSubview(makeRow3())
+        }
     }
 
-    // Row 0: q–p  (10 equal keys)
-    private func makeRow0() -> UIView {
+    // MARK: - Letter rows
+
+    private func makeLetterRow(_ letters: [String], centered: Bool = false) -> UIView {
         let stack = UIStackView()
         stack.axis = .horizontal
         stack.spacing = 6
         stack.distribution = .fillEqually
-        for letter in Self.row0Keys {
+
+        for letter in letters {
             let btn = makeLetterButton(letter)
             letterButtons[letter] = btn
             stack.addArrangedSubview(btn)
         }
         stack.heightAnchor.constraint(equalToConstant: 44).isActive = true
+
+        if centered {
+            let container = UIView()
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(stack)
+            container.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                stack.topAnchor.constraint(equalTo: container.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                stack.widthAnchor.constraint(equalTo: container.widthAnchor, multiplier: 0.92),
+            ])
+            return container
+        }
         return stack
     }
 
-    // Row 1: a–l  (9 keys, centred with spacers)
-    private func makeRow1() -> UIView {
-        let container = UIView()
+    // Row 2 for letter modes: ⇧ z–m ⌫
+    private func makeRow2Letters() -> UIView {
         let stack = UIStackView()
         stack.axis = .horizontal
         stack.spacing = 6
-        stack.distribution = .fillEqually
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for letter in Self.row1Keys {
-            let btn = makeLetterButton(letter)
-            letterButtons[letter] = btn
-            stack.addArrangedSubview(btn)
-        }
-        container.addSubview(stack)
-        container.heightAnchor.constraint(equalToConstant: 44).isActive = true
-
-        // Centred with ~5% margin on each side
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            stack.widthAnchor.constraint(equalTo: container.widthAnchor, multiplier: 0.92),
-        ])
-        return container
-    }
-
-    // Row 2: ⇧  z–m  ⌫
-    private func makeRow2() -> UIView {
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
         stack.heightAnchor.constraint(equalToConstant: 44).isActive = true
 
-        // Shift button
-        shiftButton = makeActionButton(symbol: "shift", label: "⇧", wide: true)
-        shiftButton.addTarget(self, action: #selector(shiftTapped), for: .touchUpInside)
-        stack.addArrangedSubview(shiftButton)
+        let shift = makeActionButton(symbol: "shift", label: nil, wide: true)
+        shift.addTarget(self, action: #selector(shiftTapped), for: .touchUpInside)
+        shiftButton = shift
+        stack.addArrangedSubview(shift)
 
-        // Letter keys (fill equally in the middle)
         let letterStack = UIStackView()
         letterStack.axis = .horizontal
         letterStack.spacing = 6
@@ -187,22 +254,59 @@ final class KeyboardView: UIView {
         }
         stack.addArrangedSubview(letterStack)
 
-        // Delete button
-        deleteButton = makeActionButton(symbol: "delete.left", label: "⌫", wide: true)
-        deleteButton.addTarget(self, action: #selector(deleteTapped), for: .touchUpInside)
-        // Long-press for continuous delete
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(deleteLongPress(_:)))
-        longPress.minimumPressDuration = 0.4
-        deleteButton.addGestureRecognizer(longPress)
-        stack.addArrangedSubview(deleteButton)
+        let del = makeDeleteButton()
+        stack.addArrangedSubview(del)
 
-        // Shift and delete take the same width; letter stack fills the rest
-        shiftButton.widthAnchor.constraint(equalTo: deleteButton.widthAnchor).isActive = true
-
+        shift.widthAnchor.constraint(equalTo: del.widthAnchor).isActive = true
         return stack
     }
 
-    // Row 3: 🌐  123  中/EN  ──space──  🎤  ⏎
+    // MARK: - Number/Symbol rows
+
+    private func makeCharRow(_ chars: [String]) -> UIView {
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.spacing = 6
+        stack.distribution = .fillEqually
+        stack.heightAnchor.constraint(equalToConstant: 44).isActive = true
+
+        for ch in chars {
+            let btn = makeCharButton(ch)
+            stack.addArrangedSubview(btn)
+        }
+        return stack
+    }
+
+    // Row 2 for number/symbol: toggle + chars + ⌫
+    private func makeRow2NumSym(_ chars: [String], toggleLabel: String) -> UIView {
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.spacing = 6
+        stack.heightAnchor.constraint(equalToConstant: 44).isActive = true
+
+        let toggle = makeActionButton(symbol: nil, label: toggleLabel, wide: true)
+        toggle.addTarget(self, action: #selector(numSymToggleTapped), for: .touchUpInside)
+        stack.addArrangedSubview(toggle)
+
+        let charStack = UIStackView()
+        charStack.axis = .horizontal
+        charStack.spacing = 6
+        charStack.distribution = .fillEqually
+        for ch in chars {
+            let btn = makeCharButton(ch)
+            charStack.addArrangedSubview(btn)
+        }
+        stack.addArrangedSubview(charStack)
+
+        let del = makeDeleteButton()
+        stack.addArrangedSubview(del)
+
+        toggle.widthAnchor.constraint(equalTo: del.widthAnchor).isActive = true
+        return stack
+    }
+
+    // MARK: - Row 3 (shared): 🌐 | 123/ABC | Lang | space | ✏️ | 🎤 | ⏎
+
     private func makeRow3() -> UIView {
         let stack = UIStackView()
         stack.axis = .horizontal
@@ -210,53 +314,71 @@ final class KeyboardView: UIView {
         stack.heightAnchor.constraint(equalToConstant: 44).isActive = true
 
         // Next keyboard (globe)
-        nextKeyboardButton = makeActionButton(symbol: "globe", label: nil, wide: false)
-        nextKeyboardButton.isHidden = true    // shown only when needsInputModeSwitchKey
-        stack.addArrangedSubview(nextKeyboardButton)
+        let globe = makeActionButton(symbol: "globe", label: nil, wide: false)
+        globe.isHidden = !needsInputModeSwitchKey
+        nextKeyboardButton = globe
+        stack.addArrangedSubview(globe)
 
-        // 123 (placeholder for M3)
-        let numBtn = makeActionButton(symbol: nil, label: "123", wide: false)
-        numBtn.addTarget(self, action: #selector(numTapped), for: .touchUpInside)
-        stack.addArrangedSubview(numBtn)
+        // Mode toggle (123 / ABC)
+        let modeLabel: String
+        switch mode {
+        case .english, .chinesePinyin: modeLabel = "123"
+        case .numbers, .symbols:       modeLabel = "ABC"
+        }
+        let modeBtn = makeActionButton(symbol: nil, label: modeLabel, wide: false)
+        modeBtn.addTarget(self, action: #selector(modeTapped), for: .touchUpInside)
+        modeButton = modeBtn
+        stack.addArrangedSubview(modeBtn)
 
-        // Language switch
-        langButton = makeActionButton(symbol: nil, label: "中", wide: false)
-        langButton.addTarget(self, action: #selector(langTapped), for: .touchUpInside)
-        stack.addArrangedSubview(langButton)
+        // Language
+        let lang = makeActionButton(symbol: nil, label: currentLanguageLabel, wide: false)
+        lang.addTarget(self, action: #selector(langTapped), for: .touchUpInside)
+        langButton = lang
+        stack.addArrangedSubview(lang)
 
         // Space (flexible)
-        spaceButton = UIButton(type: .system)
-        spaceButton.setTitle("space", for: .normal)
-        spaceButton.titleLabel?.font = .systemFont(ofSize: 16)
-        spaceButton.tintColor = .label
-        spaceButton.backgroundColor = .white
-        spaceButton.layer.cornerRadius = 5
-        spaceButton.layer.shadowColor = UIColor.black.cgColor
-        spaceButton.layer.shadowOffset = CGSize(width: 0, height: 1)
-        spaceButton.layer.shadowOpacity = 0.3
-        spaceButton.layer.shadowRadius = 0
-        spaceButton.translatesAutoresizingMaskIntoConstraints = false
-        spaceButton.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
-        stack.addArrangedSubview(spaceButton)
+        let space = UIButton(type: .system)
+        space.setTitle("space", for: .normal)
+        space.titleLabel?.font = .systemFont(ofSize: 16)
+        space.tintColor = .label
+        space.backgroundColor = .white
+        space.layer.cornerRadius = 5
+        space.layer.shadowColor = UIColor.black.cgColor
+        space.layer.shadowOffset = CGSize(width: 0, height: 1)
+        space.layer.shadowOpacity = 0.3
+        space.layer.shadowRadius = 0
+        space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
+        spaceButton = space
+        stack.addArrangedSubview(space)
+
+        // Edit button
+        let edit = makeActionButton(symbol: "pencil", label: nil, wide: false)
+        edit.addTarget(self, action: #selector(editTapped), for: .touchUpInside)
+        editButton = edit
+        stack.addArrangedSubview(edit)
 
         // Mic
-        micButton = makeActionButton(symbol: "mic.fill", label: nil, wide: false)
-        micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
-        stack.addArrangedSubview(micButton)
+        let mic = makeActionButton(symbol: "mic.fill", label: nil, wide: false)
+        mic.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
+        micButton = mic
+        updateMicButton()
+        stack.addArrangedSubview(mic)
 
         // Return
-        returnButton = makeActionButton(symbol: nil, label: "return", wide: false)
-        returnButton.titleLabel?.font = .systemFont(ofSize: 14)
-        returnButton.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
-        stack.addArrangedSubview(returnButton)
+        let ret = makeActionButton(symbol: nil, label: "return", wide: false)
+        ret.titleLabel?.font = .systemFont(ofSize: 14)
+        ret.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
+        returnButton = ret
+        stack.addArrangedSubview(ret)
 
-        // Width constraints: fixed-width for action keys, flexible space
-        let fixedWidth: CGFloat = 44
-        nextKeyboardButton.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
-        numBtn.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
-        langButton.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
-        micButton.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
-        returnButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        // Widths
+        let fixedWidth: CGFloat = 40
+        globe.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
+        modeBtn.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
+        lang.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
+        edit.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
+        mic.widthAnchor.constraint(equalToConstant: fixedWidth).isActive = true
+        ret.widthAnchor.constraint(equalToConstant: 64).isActive = true
 
         return stack
     }
@@ -265,12 +387,11 @@ final class KeyboardView: UIView {
 
     private func makeLetterButton(_ letter: String) -> UIButton {
         var config = UIButton.Configuration.filled()
-        config.title = letter.uppercased()
+        let display = (isShifted || isCapsLocked) ? letter.uppercased() : letter
+        config.title = display
         config.baseBackgroundColor = .white
         config.baseForegroundColor = .label
         config.background.cornerRadius = 5
-        config.background.shadowColor = .black
-        config.background.shadowRadius = 0
 
         let btn = UIButton(configuration: config)
         btn.titleLabel?.font = .systemFont(ofSize: 17, weight: .regular)
@@ -278,19 +399,35 @@ final class KeyboardView: UIView {
         btn.layer.shadowOffset = CGSize(width: 0, height: 1)
         btn.layer.shadowOpacity = 0.3
         btn.layer.shadowRadius = 0
-
-        btn.addTarget(self, action: #selector(letterTapped(_:)), for: .touchUpInside)
-
-        // Store the lowercase letter as accessibilityIdentifier for lookup
         btn.accessibilityIdentifier = letter
-
-        // Highlight feedback
+        btn.addTarget(self, action: #selector(letterTapped(_:)), for: .touchUpInside)
         btn.configurationUpdateHandler = { button in
             var c = button.configuration
-            c?.baseBackgroundColor = button.isHighlighted ? UIColor.systemGray4 : .white
+            c?.baseBackgroundColor = button.isHighlighted ? .systemGray4 : .white
             button.configuration = c
         }
+        return btn
+    }
 
+    private func makeCharButton(_ char: String) -> UIButton {
+        var config = UIButton.Configuration.filled()
+        config.title = char
+        config.baseBackgroundColor = .white
+        config.baseForegroundColor = .label
+        config.background.cornerRadius = 5
+
+        let btn = UIButton(configuration: config)
+        btn.titleLabel?.font = .systemFont(ofSize: 17, weight: .regular)
+        btn.layer.shadowColor = UIColor.black.cgColor
+        btn.layer.shadowOffset = CGSize(width: 0, height: 1)
+        btn.layer.shadowOpacity = 0.3
+        btn.layer.shadowRadius = 0
+        btn.addTarget(self, action: #selector(charTapped(_:)), for: .touchUpInside)
+        btn.configurationUpdateHandler = { button in
+            var c = button.configuration
+            c?.baseBackgroundColor = button.isHighlighted ? .systemGray4 : .white
+            button.configuration = c
+        }
         return btn
     }
 
@@ -313,7 +450,6 @@ final class KeyboardView: UIView {
         btn.layer.shadowOffset = CGSize(width: 0, height: 1)
         btn.layer.shadowOpacity = 0.3
         btn.layer.shadowRadius = 0
-
         btn.configurationUpdateHandler = { button in
             var c = button.configuration
             c?.baseBackgroundColor = button.isHighlighted
@@ -322,6 +458,16 @@ final class KeyboardView: UIView {
             button.configuration = c
         }
         return btn
+    }
+
+    private func makeDeleteButton() -> UIButton {
+        let del = makeActionButton(symbol: "delete.left", label: nil, wide: true)
+        del.addTarget(self, action: #selector(deleteTapped), for: .touchUpInside)
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(deleteLongPress(_:)))
+        longPress.minimumPressDuration = 0.4
+        del.addGestureRecognizer(longPress)
+        deleteButton = del
+        return del
     }
 
     // MARK: - State updates
@@ -337,6 +483,7 @@ final class KeyboardView: UIView {
     }
 
     private func updateShiftButton() {
+        guard let shiftButton else { return }
         let symbolName: String
         if isCapsLocked { symbolName = "capslock.fill" }
         else if isShifted { symbolName = "shift.fill" }
@@ -348,16 +495,30 @@ final class KeyboardView: UIView {
     }
 
     private func updateMicButton() {
-        let symbolName = isRecording ? "stop.circle.fill" : "mic.fill"
+        guard let micButton else { return }
+        let symbolName: String
+        let color: UIColor
+        switch micState {
+        case .idle:
+            symbolName = "mic.fill"
+            color = .label
+        case .recording:
+            symbolName = "stop.circle.fill"
+            color = .systemRed
+        case .processing:
+            symbolName = "hourglass"
+            color = .systemOrange
+        }
         var config = micButton.configuration
         config?.image = UIImage(systemName: symbolName)
-        config?.baseForegroundColor = isRecording ? .systemRed : .label
+        config?.baseForegroundColor = color
         micButton.configuration = config
     }
 
     private func refreshLanguageButton() {
+        guard let langButton else { return }
         var config = langButton.configuration
-        config?.title = (mode == .english) ? "中" : "EN"
+        config?.title = currentLanguageLabel
         langButton.configuration = config
     }
 
@@ -370,6 +531,17 @@ final class KeyboardView: UIView {
             isShifted = false
         }
         delegate?.keyboardView(self, didTap: .letter(output))
+    }
+
+    @objc private func charTapped(_ sender: UIButton) {
+        guard let title = sender.title(for: .normal) ?? sender.configuration?.title else { return }
+        // Numbers are digits, others are symbols
+        if title.count == 1, let scalar = title.unicodeScalars.first,
+           CharacterSet.decimalDigits.contains(scalar) {
+            delegate?.keyboardView(self, didTap: .digit(title))
+        } else {
+            delegate?.keyboardView(self, didTap: .symbol(title))
+        }
     }
 
     @objc private func shiftTapped() {
@@ -393,7 +565,8 @@ final class KeyboardView: UIView {
         switch gesture.state {
         case .began:
             deleteTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                self?.delegate?.keyboardView(self!, didTap: .delete)
+                guard let self else { return }
+                self.delegate?.keyboardView(self, didTap: .delete)
             }
         case .ended, .cancelled:
             deleteTimer?.invalidate()
@@ -414,11 +587,26 @@ final class KeyboardView: UIView {
         delegate?.keyboardView(self, didTap: .mic)
     }
 
+    @objc private func editTapped() {
+        delegate?.keyboardView(self, didTap: .edit)
+    }
+
     @objc private func langTapped() {
         delegate?.keyboardView(self, didTap: .switchLanguage)
     }
 
-    @objc private func numTapped() {
+    @objc private func modeTapped() {
+        switch mode {
+        case .english, .chinesePinyin:
+            previousLetterMode = mode
+            mode = .numbers
+        case .numbers, .symbols:
+            mode = previousLetterMode
+        }
         delegate?.keyboardView(self, didTap: .changeMode)
+    }
+
+    @objc private func numSymToggleTapped() {
+        mode = (mode == .numbers) ? .symbols : .numbers
     }
 }

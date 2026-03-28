@@ -4,41 +4,55 @@
 //
 //  Created by Peng Chen on 28/3/26.
 //
-//  M2 — full implementation:
-//    • QWERTY keyboard (English + Chinese Pinyin) always visible
-//    • Mic button toggles Soniox streaming STT
-//    • Real-time partial tokens shown in TranscriptionBannerView
-//    • Final tokens accumulated and inserted via textDocumentProxy
-//    • Pinyin buffer drives CandidateBarView in Chinese mode
+//  M3–M5 implementation:
+//    • Provider-agnostic STT via StreamingSTTProvider protocol
+//    • Multi-provider support (Soniox, Groq, Cerebras) via STTProviderFactory
+//    • Silence detection with configurable timeout
+//    • Number/symbol keyboard modes
+//    • Three-state banner (recording / processing / error)
+//    • Multi-language support with cycling
+//    • Edit button placeholder for M7
 //
 
 import UIKit
 import AVFoundation
 
+// MARK: - Recording state machine
+
+private enum RecordingState {
+    case idle
+    case recording
+    case processing   // waiting for REST-based provider to return results
+}
+
 final class KeyboardViewController: UIInputViewController {
 
     // MARK: - Services
 
-    private let audioService  = AudioCaptureService()
-    private var sonioxService: SonioxStreamingService?
-    private let pinyinEngine  = PinyinEngine()
+    private let audioService = AudioCaptureService()
+    private var sttProvider: (any StreamingSTTProvider)?
+    private let pinyinEngine = PinyinEngine()
 
     // MARK: - Views
 
-    private let bannerView    = TranscriptionBannerView()
-    private let candidateBar  = CandidateBarView()
-    private let keyboardView  = KeyboardView()
+    private let bannerView   = TranscriptionBannerView()
+    private let candidateBar = CandidateBarView()
+    private let keyboardView = KeyboardView()
 
     // MARK: - State
 
-    private var isRecording  = false
-    private var committedSTT = ""      // final tokens accumulated during this session
-    private var partialSTT   = ""      // latest non-final token
-    private var pinyinBuffer = ""      // typed pinyin in Chinese mode
+    private var recordingState: RecordingState = .idle
+    private var committedSTT = ""
+    private var partialSTT   = ""
+    private var pinyinBuffer = ""
+
+    /// Index into activeLanguages for cycling
+    private var currentLanguageIndex = 0
 
     private var keyboardMode: KeyboardMode = .english {
         didSet {
             keyboardView.mode = keyboardMode
+            updateLanguageLabel()
             updateCandidateBar()
         }
     }
@@ -47,11 +61,10 @@ final class KeyboardViewController: UIInputViewController {
 
     private var heightConstraint: NSLayoutConstraint?
 
-    /// Total height: base keyboard + banner (when recording) + candidate bar (when pinyin active)
     private var desiredHeight: CGFloat {
-        var h: CGFloat = 260  // base keyboard
-        if isRecording          { h += 56  }
-        if !pinyinBuffer.isEmpty { h += 44  }
+        var h: CGFloat = 260
+        if recordingState != .idle    { h += 56 }
+        if !pinyinBuffer.isEmpty      { h += 44 }
         return h
     }
 
@@ -74,40 +87,33 @@ final class KeyboardViewController: UIInputViewController {
     private func setupUI() {
         view.backgroundColor = .systemGroupedBackground
 
-        // Height anchor (priority < required so the system can still override)
         let h = view.heightAnchor.constraint(equalToConstant: desiredHeight)
         h.priority = .defaultHigh
         h.isActive = true
         heightConstraint = h
 
-        // --- Banner (hidden until recording starts) ---
         bannerView.translatesAutoresizingMaskIntoConstraints = false
         bannerView.isHidden = true
         view.addSubview(bannerView)
 
-        // --- Candidate bar (hidden until pinyin buffer non-empty) ---
         candidateBar.translatesAutoresizingMaskIntoConstraints = false
         candidateBar.isHidden = true
         view.addSubview(candidateBar)
 
-        // --- Keyboard ---
         keyboardView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(keyboardView)
 
         NSLayoutConstraint.activate([
-            // Banner pinned to top
             bannerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bannerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bannerView.topAnchor.constraint(equalTo: view.topAnchor),
             bannerView.heightAnchor.constraint(equalToConstant: 56),
 
-            // Candidate bar below banner
             candidateBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             candidateBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             candidateBar.topAnchor.constraint(equalTo: bannerView.bottomAnchor),
             candidateBar.heightAnchor.constraint(equalToConstant: 44),
 
-            // Keyboard fills remainder
             keyboardView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             keyboardView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             keyboardView.topAnchor.constraint(equalTo: candidateBar.bottomAnchor),
@@ -116,29 +122,76 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func setupCallbacks() {
-        // Keyboard key taps
         keyboardView.delegate = self
+        audioService.delegate = self
 
-        // Banner clear button
         bannerView.onClear = { [weak self] in
             self?.committedSTT = ""
             self?.partialSTT   = ""
         }
 
-        // Candidate selection
+        bannerView.onRetry = { [weak self] in
+            self?.startRecording()
+        }
+
+        bannerView.onCancel = { [weak self] in
+            self?.cancelRecording()
+        }
+
         candidateBar.onSelect = { [weak self] character in
             self?.insertCandidate(character)
         }
-
-        // Audio capture
-        audioService.delegate = self
     }
 
     private func applyDefaultLanguage() {
-        switch SettingsStore.shared.defaultLanguage {
-        case .english: keyboardMode = .english
-        case .chinese: keyboardMode = .chinesePinyin
+        let settings = SettingsStore.shared
+        let langs = settings.activeLanguages
+        currentLanguageIndex = 0
+
+        if let first = langs.first {
+            switch first {
+            case .zhCN, .zhYue: keyboardMode = .chinesePinyin
+            default:            keyboardMode = .english
+            }
         }
+
+        // Configure silence detector from settings
+        audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
+
+        updateLanguageLabel()
+    }
+
+    // MARK: - Language cycling
+
+    private func cycleLanguage() {
+        let langs = SettingsStore.shared.activeLanguages
+        guard !langs.isEmpty else { return }
+        currentLanguageIndex = (currentLanguageIndex + 1) % langs.count
+        let lang = langs[currentLanguageIndex]
+
+        switch lang {
+        case .zhCN, .zhYue:
+            keyboardMode = .chinesePinyin
+        default:
+            keyboardMode = .english
+        }
+        pinyinBuffer = ""
+        updateCandidateBar()
+    }
+
+    private func updateLanguageLabel() {
+        let langs = SettingsStore.shared.activeLanguages
+        if currentLanguageIndex < langs.count {
+            keyboardView.currentLanguageLabel = langs[currentLanguageIndex].shortLabel
+        } else {
+            keyboardView.currentLanguageLabel = "EN"
+        }
+    }
+
+    private var currentLanguage: RecognitionLanguage {
+        let langs = SettingsStore.shared.activeLanguages
+        guard currentLanguageIndex < langs.count else { return .en }
+        return langs[currentLanguageIndex]
     }
 
     // MARK: - Recording control
@@ -149,18 +202,18 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        let apiKey = SettingsStore.shared.activeAPIKey
+        let settings = SettingsStore.shared
+        let apiKey = settings.activeAPIKey
         guard !apiKey.isEmpty else {
             showToast("请先在 VoiceKey App 中填写 API Key")
             return
         }
 
-        // Request mic permission at runtime (belt-and-suspenders)
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if granted {
-                    self.beginSession(apiKey: apiKey)
+                    self.beginSession(settings: settings, apiKey: apiKey)
                 } else {
                     self.showToast("需要麦克风权限")
                 }
@@ -168,47 +221,101 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func beginSession(apiKey: String) {
+    private func beginSession(settings: SettingsStore, apiKey: String) {
         committedSTT = ""
         partialSTT   = ""
         bannerView.clear()
+        bannerView.setState(.recording)
 
-        let hints = keyboardMode == .chinesePinyin ? ["zh", "en"] : ["en", "zh"]
-        let soniox = SonioxStreamingService(apiKey: apiKey, languageHints: hints)
-        soniox.delegate = self
-        sonioxService = soniox
-        soniox.connect()
+        // Configure silence detector
+        audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
+
+        // Create provider via factory
+        let provider = STTProviderFactory.makeProvider(
+            engine: settings.sttEngine,
+            apiKey: apiKey,
+            languages: settings.activeLanguages,
+            model: settings.sttModel.isEmpty ? nil : settings.sttModel
+        )
+
+        guard let provider else {
+            showToast("不支持的语音识别引擎: \(settings.sttEngine.displayName)")
+            return
+        }
+
+        provider.delegate = self
+        sttProvider = provider
+        provider.connect()
 
         do {
             try audioService.startCapture()
         } catch {
             showToast("麦克风启动失败: \(error.localizedDescription)")
-            soniox.disconnect()
-            sonioxService = nil
+            provider.disconnect()
+            sttProvider = nil
             return
         }
 
-        isRecording = true
-        keyboardView.isRecording = true
+        recordingState = .recording
+        keyboardView.micState = .recording
         setBannerVisible(true)
     }
 
     private func stopRecording() {
-        guard isRecording else { return }
+        guard recordingState == .recording else { return }
         audioService.stopCapture()
-        sonioxService?.finishAudio()
-        // Final tokens will arrive via delegate; we disconnect after a short grace period
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.sonioxService?.disconnect()
-            self?.sonioxService = nil
+
+        let settings = SettingsStore.shared
+
+        if settings.sttEngine.supportsStreaming {
+            // Streaming provider: signal end-of-audio, wait for final tokens
+            sttProvider?.finishAudio()
+            recordingState = .idle
+            keyboardView.micState = .idle
+            // Grace period for final tokens
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.sttProvider?.disconnect()
+                self?.sttProvider = nil
+            }
+        } else {
+            // REST provider: show processing state while waiting for response
+            sttProvider?.finishAudio()
+            recordingState = .processing
+            keyboardView.micState = .processing
+            bannerView.setState(.processing)
+            // Start progress animation
+            animateProgress()
         }
-        isRecording = false
-        keyboardView.isRecording = false
+    }
+
+    private func cancelRecording() {
+        audioService.stopCapture()
+        sttProvider?.disconnect()
+        sttProvider = nil
+        recordingState = .idle
+        keyboardView.micState = .idle
+        committedSTT = ""
+        partialSTT = ""
+        bannerView.clear()
+        setBannerVisible(false)
+    }
+
+    /// Animated progress bar for REST-based providers.
+    private func animateProgress() {
+        // Simulate progress over ~10 seconds
+        var progress: Float = 0
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+            guard let self, self.recordingState == .processing else {
+                timer.invalidate()
+                return
+            }
+            progress = min(progress + 0.05, 0.95)  // never reaches 100% until result arrives
+            self.bannerView.setProgress(progress)
+        }
     }
 
     // MARK: - Text insertion
 
-    /// Insert all accumulated STT text into the active text field and reset.
     private func flushSTTText() {
         let full = committedSTT + partialSTT
         guard !full.isEmpty else { return }
@@ -217,6 +324,8 @@ final class KeyboardViewController: UIInputViewController {
         partialSTT   = ""
         bannerView.clear()
         setBannerVisible(false)
+        recordingState = .idle
+        keyboardView.micState = .idle
     }
 
     // MARK: - Pinyin handling
@@ -239,7 +348,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func commitPinyinAsRomaji() {
-        // User pressed space / return without selecting a candidate — insert raw pinyin
         guard !pinyinBuffer.isEmpty else { return }
         textDocumentProxy.insertText(pinyinBuffer)
         pinyinBuffer = ""
@@ -312,9 +420,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 textDocumentProxy.insertText(char)
             }
 
+        case .digit(let d):
+            textDocumentProxy.insertText(d)
+
+        case .symbol(let s):
+            textDocumentProxy.insertText(s)
+
         case .space:
             if keyboardMode == .chinesePinyin && !pinyinBuffer.isEmpty {
-                // Space selects first candidate or commits raw pinyin
                 let candidates = pinyinEngine.candidates(for: pinyinBuffer)
                 if let first = candidates.first {
                     insertCandidate(first)
@@ -322,8 +435,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     commitPinyinAsRomaji()
                 }
             } else {
-                // If recording and there's accumulated STT, insert it first
-                if isRecording && !committedSTT.isEmpty {
+                if recordingState == .recording && !committedSTT.isEmpty {
                     flushSTTText()
                 }
                 textDocumentProxy.insertText(" ")
@@ -333,7 +445,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if keyboardMode == .chinesePinyin && !pinyinBuffer.isEmpty {
                 commitPinyinAsRomaji()
             } else {
-                if isRecording { flushSTTText() }
+                if recordingState == .recording { flushSTTText() }
                 textDocumentProxy.insertText("\n")
             }
 
@@ -345,24 +457,32 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
 
         case .mic:
-            if isRecording {
-                stopRecording()
-                // Insert accumulated text on stop
-                flushSTTText()
-            } else {
+            switch recordingState {
+            case .idle:
                 startRecording()
+            case .recording:
+                stopRecording()
+                // For streaming providers, flush text immediately
+                if SettingsStore.shared.sttEngine.supportsStreaming {
+                    flushSTTText()
+                }
+            case .processing:
+                // Already processing — ignore or cancel
+                break
             }
 
         case .switchLanguage:
-            keyboardMode = (keyboardMode == .english) ? .chinesePinyin : .english
-            pinyinBuffer = ""
-            updateCandidateBar()
+            cycleLanguage()
 
         case .nextKeyboard:
             advanceToNextInputMode()
 
-        case .shift, .changeMode, .digit:
-            break  // shift is handled inside KeyboardView itself
+        case .edit:
+            // Placeholder for M7 — show toast for now
+            showToast("编辑模式将在后续版本中推出")
+
+        case .shift, .changeMode:
+            break  // handled inside KeyboardView
         }
     }
 }
@@ -371,7 +491,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
 extension KeyboardViewController: AudioCaptureDelegate {
     func audioCaptureService(_ service: AudioCaptureService, didCapture pcmData: Data) {
-        sonioxService?.sendAudio(pcmData)
+        sttProvider?.sendAudio(pcmData)
     }
 
     func audioCaptureService(_ service: AudioCaptureService, didFailWithError error: Error) {
@@ -382,44 +502,68 @@ extension KeyboardViewController: AudioCaptureDelegate {
     }
 
     func audioCaptureServiceDidStop(_ service: AudioCaptureService) {
-        // No-op; stopRecording() already handles state
+        // No-op
+    }
+
+    func audioCaptureServiceDidDetectSilenceTimeout(_ service: AudioCaptureService) {
+        // Auto-stop on silence
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.recordingState == .recording else { return }
+            self.stopRecording()
+            if SettingsStore.shared.sttEngine.supportsStreaming {
+                self.flushSTTText()
+            }
+        }
     }
 }
 
-// MARK: - SonioxStreamingDelegate
+// MARK: - STTProviderDelegate
 
-extension KeyboardViewController: SonioxStreamingDelegate {
+extension KeyboardViewController: STTProviderDelegate {
 
-    func sonioxServiceDidConnect(_ service: SonioxStreamingService) {
-        // Connected — audio is already flowing from startCapture()
+    func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {
+        // Connected — audio is already flowing
     }
 
-    func sonioxServiceDidDisconnect(_ service: SonioxStreamingService) {
+    func sttProviderDidDisconnect(_ provider: any StreamingSTTProvider) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if self.isRecording {
-                // Unexpected disconnect
-                self.stopRecording()
+
+            if self.recordingState == .processing {
+                // REST provider finished — insert text
+                self.flushSTTText()
+            } else if self.recordingState == .recording {
+                // Unexpected disconnect during recording
+                self.recordingState = .idle
+                self.keyboardView.micState = .idle
                 self.showToast("语音识别连接断开")
             }
         }
     }
 
-    func sonioxService(_ service: SonioxStreamingService, didUpdatePartial text: String) {
+    func sttProvider(_ provider: any StreamingSTTProvider, didUpdatePartial text: String) {
         partialSTT = text
         bannerView.update(committed: committedSTT, partial: partialSTT)
     }
 
-    func sonioxService(_ service: SonioxStreamingService, didFinalizePart text: String) {
+    func sttProvider(_ provider: any StreamingSTTProvider, didFinalizePart text: String) {
         committedSTT += text
         partialSTT = ""
         bannerView.update(committed: committedSTT, partial: "")
     }
 
-    func sonioxService(_ service: SonioxStreamingService, didFailWithError error: Error) {
+    func sttProvider(_ provider: any StreamingSTTProvider, didFailWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
-            self?.showToast("Soniox 错误: \(error.localizedDescription)")
-            self?.stopRecording()
+            guard let self else { return }
+            if self.recordingState == .processing {
+                // REST provider failed — show error with retry
+                self.bannerView.setState(.error(error.localizedDescription))
+                self.keyboardView.micState = .idle
+                self.recordingState = .idle
+            } else {
+                self.showToast("语音识别错误: \(error.localizedDescription)")
+                self.stopRecording()
+            }
         }
     }
 }

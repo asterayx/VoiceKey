@@ -5,7 +5,7 @@
 //  Created by Peng Chen on 28/3/26.
 //
 //  Manages a WebSocket connection to the Soniox streaming STT API.
-//  Sends PCM audio frames and surfaces partial / final token results.
+//  Conforms to StreamingSTTProvider for provider-agnostic usage.
 //
 //  Soniox protocol:
 //    1. Connect to wss://api.soniox.com/transcribe-websocket
@@ -18,26 +18,11 @@
 
 import Foundation
 
-// MARK: - Delegate
-
-protocol SonioxStreamingDelegate: AnyObject {
-    /// Called on Main thread with the accumulated partial (non-final) text so far.
-    func sonioxService(_ service: SonioxStreamingService, didUpdatePartial text: String)
-    /// Called on Main thread each time a chunk of final text arrives.
-    func sonioxService(_ service: SonioxStreamingService, didFinalizePart text: String)
-    /// Called when the WebSocket connection is established and config sent.
-    func sonioxServiceDidConnect(_ service: SonioxStreamingService)
-    /// Called when the connection closes (normally or on error).
-    func sonioxServiceDidDisconnect(_ service: SonioxStreamingService)
-    /// Called on any error; the service disconnects automatically.
-    func sonioxService(_ service: SonioxStreamingService, didFailWithError error: Error)
-}
-
 // MARK: - Service
 
-final class SonioxStreamingService: NSObject {
+final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
-    weak var delegate: SonioxStreamingDelegate?
+    weak var delegate: STTProviderDelegate?
 
     private(set) var isConnected = false
 
@@ -47,16 +32,20 @@ final class SonioxStreamingService: NSObject {
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession?
 
-    // Buffer of final text received since last flush
-    private var pendingFinalText = ""
+    // Idle disconnect timer
+    private var idleTimer: Timer?
+    private var idleTimeoutSeconds: Double
 
-    init(apiKey: String, languageHints: [String] = ["en", "zh"]) {
+    init(apiKey: String,
+         languageHints: [String] = ["en", "zh"],
+         idleTimeoutSeconds: Double = 30.0) {
         self.apiKey = apiKey
         self.languageHints = languageHints
+        self.idleTimeoutSeconds = idleTimeoutSeconds
         super.init()
     }
 
-    // MARK: - Lifecycle
+    // MARK: - StreamingSTTProvider
 
     func connect() {
         guard !isConnected else { return }
@@ -73,25 +62,36 @@ final class SonioxStreamingService: NSObject {
     }
 
     func disconnect() {
+        idleTimer?.invalidate()
+        idleTimer = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         tearDown()
     }
 
-    // MARK: - Audio
-
-    /// Send a chunk of raw PCM audio data.
     func sendAudio(_ data: Data) {
         guard isConnected, !data.isEmpty else { return }
+        resetIdleTimer()
         webSocketTask?.send(.data(data)) { [weak self] error in
             if let error { self?.handleError(error) }
         }
     }
 
-    /// Signal end of audio stream so Soniox flushes remaining tokens.
     func finishAudio() {
         guard isConnected else { return }
+        idleTimer?.invalidate()
+        idleTimer = nil
         webSocketTask?.send(.data(Data())) { [weak self] error in
             if let error { self?.handleError(error) }
+        }
+    }
+
+    // MARK: - Idle timer
+
+    private func resetIdleTimer() {
+        idleTimer?.invalidate()
+        guard idleTimeoutSeconds > 0 else { return }
+        idleTimer = Timer.scheduledTimer(withTimeInterval: idleTimeoutSeconds, repeats: false) { [weak self] _ in
+            self?.disconnect()
         }
     }
 
@@ -115,7 +115,7 @@ final class SonioxStreamingService: NSObject {
                 self.handleError(error)
             } else {
                 self.isConnected = true
-                self.delegate?.sonioxServiceDidConnect(self)
+                self.delegate?.sttProviderDidConnect(self)
             }
         }
     }
@@ -144,27 +144,25 @@ final class SonioxStreamingService: NSObject {
 
         if !finalTokens.isEmpty {
             let finalChunk = finalTokens.map(\.text).joined()
-            pendingFinalText += finalChunk
-            delegate?.sonioxService(self, didFinalizePart: finalChunk)
+            delegate?.sttProvider(self, didFinalizePart: finalChunk)
         }
 
         if !partialTokens.isEmpty {
             let partialChunk = partialTokens.map(\.text).joined()
-            delegate?.sonioxService(self, didUpdatePartial: partialChunk)
+            delegate?.sttProvider(self, didUpdatePartial: partialChunk)
         }
     }
 
     private func handleError(_ error: Error) {
-        delegate?.sonioxService(self, didFailWithError: error)
+        delegate?.sttProvider(self, didFailWithError: error)
         tearDown()
-        delegate?.sonioxServiceDidDisconnect(self)
+        delegate?.sttProviderDidDisconnect(self)
     }
 
     private func tearDown() {
         isConnected = false
         webSocketTask = nil
         urlSession = nil
-        pendingFinalText = ""
     }
 }
 
@@ -176,7 +174,7 @@ extension SonioxStreamingService: URLSessionWebSocketDelegate {
                     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
                     reason: Data?) {
         tearDown()
-        delegate?.sonioxServiceDidDisconnect(self)
+        delegate?.sttProviderDidDisconnect(self)
     }
 }
 

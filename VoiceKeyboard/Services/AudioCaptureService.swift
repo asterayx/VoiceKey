@@ -5,7 +5,8 @@
 //  Created by Peng Chen on 28/3/26.
 //
 //  Captures microphone audio via AVAudioEngine and converts it to
-//  16 kHz / 16-bit mono PCM suitable for Soniox / Deepgram streaming.
+//  16 kHz / 16-bit mono PCM suitable for streaming STT services.
+//  Integrates SilenceDetector for automatic silence timeout.
 //
 
 import AVFoundation
@@ -14,17 +15,27 @@ protocol AudioCaptureDelegate: AnyObject {
     func audioCaptureService(_ service: AudioCaptureService, didCapture pcmData: Data)
     func audioCaptureService(_ service: AudioCaptureService, didFailWithError error: Error)
     func audioCaptureServiceDidStop(_ service: AudioCaptureService)
+    /// Called when silence exceeds the configured timeout.
+    func audioCaptureServiceDidDetectSilenceTimeout(_ service: AudioCaptureService)
+}
+
+// Default implementation so existing conformers don't break
+extension AudioCaptureDelegate {
+    func audioCaptureServiceDidDetectSilenceTimeout(_ service: AudioCaptureService) {}
 }
 
 final class AudioCaptureService {
 
     weak var delegate: AudioCaptureDelegate?
 
+    /// Silence detector — configure threshold and timeout before starting.
+    let silenceDetector = SilenceDetector()
+
     private let audioEngine = AVAudioEngine()
     private var audioConverter: AVAudioConverter?
     private(set) var isRunning = false
 
-    // Soniox / Deepgram expect: 16 kHz, Int16, mono
+    // Soniox / Deepgram / Groq / Cerebras expect: 16 kHz, Int16, mono
     static let targetSampleRate: Double = 16_000
     private let tapBufferSize: AVAudioFrameCount = 4096
 
@@ -52,6 +63,15 @@ final class AudioCaptureService {
         }
         audioConverter = converter
 
+        // Reset silence detector
+        silenceDetector.reset()
+        silenceDetector.onSilenceTimeout = { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.delegate?.audioCaptureServiceDidDetectSilenceTimeout(self)
+            }
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: inputFormat) { [weak self] buffer, _ in
             self?.process(buffer: buffer, converter: converter, targetFormat: targetFormat)
         }
@@ -67,6 +87,7 @@ final class AudioCaptureService {
         audioEngine.stop()
         audioConverter = nil
         isRunning = false
+        silenceDetector.reset()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         delegate?.audioCaptureServiceDidStop(self)
     }
@@ -104,6 +125,10 @@ final class AudioCaptureService {
         guard let channelData = outputBuffer.int16ChannelData else { return }
         let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Int16>.size
         let data = Data(bytes: channelData[0], count: byteCount)
+
+        // Feed silence detector
+        silenceDetector.process(data)
+
         delegate?.audioCaptureService(self, didCapture: data)
     }
 
