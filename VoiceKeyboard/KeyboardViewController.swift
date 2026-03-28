@@ -32,8 +32,11 @@ final class KeyboardViewController: UIInputViewController {
     private var currentLanguageIndex = 0
     private var lastResultTimestamp: TimeInterval = 0
 
-    /// Timer that polls App Group for STT results.
+    /// Timer that polls App Group for STT results (fallback for Darwin notifications).
     private var pollTimer: Timer?
+
+    /// Timer that detects if the main app failed to respond after URL Scheme launch.
+    private var launchTimeoutTimer: Timer?
 
     private var keyboardMode: KeyboardMode = .english {
         didSet {
@@ -76,6 +79,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         stopPolling()
+        VoiceKeyContract.removeDarwinObserver()
     }
 
     // MARK: - UI Setup
@@ -127,6 +131,11 @@ final class KeyboardViewController: UIInputViewController {
         draftCanvas.onCancel = { [weak self] in
             self?.hideDraftCanvas()
             VoiceKeyContract.resetSession()
+        }
+
+        draftCanvas.onRetry = { [weak self] in
+            VoiceKeyContract.resetSession()
+            self?.triggerRecording()
         }
 
         candidateBar.onSelect = { [weak self] character in
@@ -199,15 +208,33 @@ final class KeyboardViewController: UIInputViewController {
             responder = r.next
         }
 
-        // Start polling for results
-        startPolling()
+        // Listen for Darwin notifications (event-driven, immediate)
+        startListening()
+
+        // Start launch timeout — if main app doesn't respond within 5s, show error
+        launchTimeoutTimer?.invalidate()
+        launchTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            let status = VoiceKeyContract.currentStatus()
+            if status == .idle {
+                self.draftCanvas.showError("主 App 未响应，请手动打开 VoiceKey App")
+            }
+        }
     }
 
-    // MARK: - Polling for results
+    // MARK: - Event-driven listening + fallback polling
 
-    private func startPolling() {
+    private func startListening() {
         stopPolling()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+
+        // Primary: Darwin notification (immediate, event-driven)
+        VoiceKeyContract.observeDarwinNotification { [weak self] in
+            self?.cancelLaunchTimeout()
+            self?.checkForPendingResult()
+        }
+
+        // Fallback: Timer polling at low frequency (in case Darwin notification is missed)
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.checkForPendingResult()
         }
     }
@@ -215,6 +242,12 @@ final class KeyboardViewController: UIInputViewController {
     private func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        VoiceKeyContract.removeDarwinObserver()
+    }
+
+    private func cancelLaunchTimeout() {
+        launchTimeoutTimer?.invalidate()
+        launchTimeoutTimer = nil
     }
 
     private func checkForPendingResult() {
@@ -225,12 +258,14 @@ final class KeyboardViewController: UIInputViewController {
             break
 
         case .recording:
+            cancelLaunchTimeout()
             if draftCanvas.isHidden {
                 showDraftCanvas()
             }
             draftCanvas.showRecording()
 
         case .processing:
+            cancelLaunchTimeout()
             draftCanvas.showProcessing()
             // Check for partial text updates
             let partial = VoiceKeyContract.currentPartialText()
@@ -239,6 +274,7 @@ final class KeyboardViewController: UIInputViewController {
             }
 
         case .done:
+            cancelLaunchTimeout()
             let timestamp = VoiceKeyContract.currentTimestamp()
             guard timestamp > lastResultTimestamp else { return }
             lastResultTimestamp = timestamp
@@ -253,8 +289,9 @@ final class KeyboardViewController: UIInputViewController {
             stopPolling()
 
         case .error:
+            cancelLaunchTimeout()
             let errorMsg = VoiceKeyContract.currentError()
-            draftCanvas.showError(errorMsg)
+            draftCanvas.showError(errorMsg.isEmpty ? "录音或识别过程中发生未知错误" : errorMsg)
             stopPolling()
         }
     }

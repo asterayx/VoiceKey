@@ -119,6 +119,7 @@ final class VoiceInputViewModel: ObservableObject {
         let apiKey = settings.activeAPIKey
         guard !apiKey.isEmpty else {
             statusMessage = "请先在设置中填写 API Key"
+            VoiceKeyContract.setError("API Key 未配置，请打开 VoiceKey App 设置")
             return
         }
 
@@ -129,6 +130,7 @@ final class VoiceInputViewModel: ObservableObject {
                     self.beginSession(settings: settings, apiKey: apiKey)
                 } else {
                     self.statusMessage = "需要麦克风权限"
+                    VoiceKeyContract.setError("录音权限被拒绝，请在系统设置中允许 VoiceKey 访问麦克风")
                 }
             }
         }
@@ -160,6 +162,7 @@ final class VoiceInputViewModel: ObservableObject {
 
         guard let provider else {
             statusMessage = "不支持的引擎: \(settings.sttEngine.displayName)"
+            VoiceKeyContract.setError("\(settings.sttEngine.displayName) 引擎初始化失败，请检查 API Key")
             return
         }
 
@@ -173,6 +176,7 @@ final class VoiceInputViewModel: ObservableObject {
             try audioService.startCapture()
         } catch {
             statusMessage = "麦克风启动失败: \(error.localizedDescription)"
+            VoiceKeyContract.setError("麦克风启动失败: \(error.localizedDescription)")
             provider.disconnect()
             sttProvider = nil
             return

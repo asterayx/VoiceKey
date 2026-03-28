@@ -7,6 +7,12 @@
 //  Shared settings via App Group, accessible from both the host app
 //  and keyboard extension.
 //
+//  SECURITY NOTE: API Keys are currently stored in App Group UserDefaults
+//  for simplicity. Production release should migrate to Keychain storage
+//  via Keychain Sharing (same Keychain Access Group) for hardware-level
+//  encryption. Non-sensitive settings (engine, languages, timeouts) stay
+//  in UserDefaults.
+//
 
 import Foundation
 import Combine

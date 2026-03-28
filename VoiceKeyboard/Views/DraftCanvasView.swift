@@ -21,6 +21,8 @@ final class DraftCanvasView: UIView {
     var onConfirm: ((String) -> Void)?
     /// Called when user cancels — discard draft.
     var onCancel: (() -> Void)?
+    /// Called when user taps retry after an error.
+    var onRetry: (() -> Void)?
 
     // MARK: - State
 
@@ -87,6 +89,21 @@ final class DraftCanvasView: UIView {
         return btn
     }()
 
+    private lazy var retryButton: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.title = "重试"
+        config.baseBackgroundColor = .systemBlue
+        config.baseForegroundColor = .white
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12)
+        let btn = UIButton(configuration: config)
+        btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.isHidden = true
+        btn.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
+        return btn
+    }()
+
     // MARK: - Init
 
     override init(frame: CGRect) {
@@ -106,18 +123,24 @@ final class DraftCanvasView: UIView {
         addSubview(statusLabel)
         addSubview(textView)
         addSubview(confirmButton)
+        addSubview(retryButton)
         addSubview(cancelButton)
 
         NSLayoutConstraint.activate([
             statusLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
             statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: retryButton.leadingAnchor, constant: -4),
 
             cancelButton.topAnchor.constraint(equalTo: topAnchor, constant: 2),
             cancelButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
             cancelButton.widthAnchor.constraint(equalToConstant: 28),
             cancelButton.heightAnchor.constraint(equalToConstant: 28),
 
-            confirmButton.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -4),
+            retryButton.trailingAnchor.constraint(equalTo: cancelButton.leadingAnchor, constant: -2),
+            retryButton.centerYAnchor.constraint(equalTo: cancelButton.centerYAnchor),
+            retryButton.heightAnchor.constraint(equalToConstant: 24),
+
+            confirmButton.trailingAnchor.constraint(equalTo: retryButton.leadingAnchor, constant: -4),
             confirmButton.centerYAnchor.constraint(equalTo: cancelButton.centerYAnchor),
             confirmButton.widthAnchor.constraint(equalToConstant: 32),
             confirmButton.heightAnchor.constraint(equalToConstant: 32),
@@ -135,16 +158,19 @@ final class DraftCanvasView: UIView {
         statusText = "等待录音结果..."
         textView.text = ""
         confirmButton.isEnabled = false
+        retryButton.isHidden = true
     }
 
     func showRecording() {
         statusText = "● 录音中..."
         statusLabel.textColor = .systemRed
+        retryButton.isHidden = true
     }
 
     func showProcessing() {
         statusText = "处理中..."
         statusLabel.textColor = .systemOrange
+        retryButton.isHidden = true
     }
 
     func showResult(_ result: String) {
@@ -152,6 +178,7 @@ final class DraftCanvasView: UIView {
         statusLabel.textColor = .systemGreen
         textView.text = result
         confirmButton.isEnabled = true
+        retryButton.isHidden = true
     }
 
     func showPartial(committed: String, partial: String) {
@@ -175,8 +202,11 @@ final class DraftCanvasView: UIView {
     }
 
     func showError(_ message: String) {
-        statusText = "错误: \(message)"
+        statusText = message
         statusLabel.textColor = .systemRed
+        retryButton.isHidden = false
+        confirmButton.isEnabled = false
+        textView.text = ""
     }
 
     func clear() {
@@ -185,6 +215,7 @@ final class DraftCanvasView: UIView {
         textView.text = ""
         textView.attributedText = nil
         confirmButton.isEnabled = false
+        retryButton.isHidden = true
     }
 
     // MARK: - Actions
@@ -198,5 +229,9 @@ final class DraftCanvasView: UIView {
     @objc private func cancelTapped() {
         clear()
         onCancel?()
+    }
+
+    @objc private func retryTapped() {
+        onRetry?()
     }
 }

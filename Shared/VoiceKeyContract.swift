@@ -22,6 +22,10 @@ enum VoiceKeyContract {
     static let urlSchemeRecord  = "voicekey://record"
     static let urlSchemeCommand = "voicekey://command"
 
+    /// Darwin notification name for cross-process event-driven updates.
+    /// Main app posts this after writing to UserDefaults; keyboard listens.
+    static let darwinNotificationName = "com.asterayx.voicekey.sttUpdate" as CFString
+
     // MARK: - UserDefaults Keys
 
     enum Key {
@@ -60,22 +64,61 @@ extension VoiceKeyContract {
 
     static func setStatus(_ status: VKStatus) {
         sharedDefaults?.set(status.rawValue, forKey: Key.sttStatus)
+        postDarwinNotification()
     }
 
     static func setPartialText(_ text: String) {
         sharedDefaults?.set(text, forKey: Key.sttPartial)
+        postDarwinNotification()
     }
 
     static func setResult(_ text: String) {
         sharedDefaults?.set(text, forKey: Key.sttResult)
         sharedDefaults?.set(Date().timeIntervalSince1970, forKey: Key.sttTimestamp)
         sharedDefaults?.set(VKStatus.done.rawValue, forKey: Key.sttStatus)
+        postDarwinNotification()
     }
 
     static func setError(_ message: String) {
         sharedDefaults?.set(message, forKey: Key.sttError)
         sharedDefaults?.set(VKStatus.error.rawValue, forKey: Key.sttStatus)
+        postDarwinNotification()
     }
+
+    // MARK: - Darwin notification (event-driven cross-process communication)
+
+    /// Post a Darwin notification so the keyboard extension can react immediately
+    /// instead of waiting for the next poll cycle. Call after every UserDefaults write.
+    static func postDarwinNotification() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName(darwinNotificationName), nil, nil, true)
+    }
+
+    /// Register to receive Darwin notifications (call from keyboard extension).
+    /// - Parameter callback: Invoked on the main thread when the main app updates state.
+    static func observeDarwinNotification(callback: @escaping () -> Void) {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        _darwinCallback = callback
+        CFNotificationCenterAddObserver(
+            center, nil,
+            { _, _, _, _, _ in
+                DispatchQueue.main.async { _darwinCallback?() }
+            },
+            darwinNotificationName,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    /// Remove Darwin notification observer (call from keyboard extension on dealloc).
+    static func removeDarwinObserver() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterRemoveObserver(center, nil, CFNotificationName(darwinNotificationName), nil)
+        _darwinCallback = nil
+    }
+
+    /// Stored callback for Darwin notification (global, only one observer at a time).
+    private static var _darwinCallback: (() -> Void)?
 
     static func resetSession() {
         let defaults = sharedDefaults

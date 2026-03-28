@@ -29,11 +29,14 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 - `voicekey://record` — 启动录音
 - `voicekey://command?text=...` — 编辑命令模式
 
-**主 App → 键盘**: App Group UserDefaults
+**主 App → 键盘**: App Group UserDefaults + Darwin 通知
 - `vk_stt_result` — ASR 识别结果文本
 - `vk_stt_status` — 状态 (idle/recording/processing/done/error)
 - `vk_stt_partial` — 流式 partial 文本（Soniox）
 - `vk_stt_timestamp` — 结果时间戳（用于去重）
+- `vk_stt_error` — 具体错误信息（网络断开、API Key 无效、录音权限拒绝等）
+
+**实时通知（替代轮询）**: 主 App 写入 UserDefaults 后通过 `CFNotificationCenterGetDarwinNotifyCenter` 发送 `com.asterayx.voicekey.sttUpdate` 通知，键盘扩展监听后立即读取，省电且实时性更高。Timer 轮询仅作兜底（防止通知丢失）。
 
 ### 交互流程
 
@@ -54,6 +57,11 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 - **后台运行**: 不可能。键盘收起或锁屏后扩展被挂起
 - **textDocumentProxy**: selectedText 不可靠，用 DraftCanvas 替代
 - **防熄屏**: 键盘扩展无法控制；主 App 可通过 `isIdleTimerDisabled = true`
+
+## 安全策略
+
+- **API Key 存储**: 所有 API Key 使用 **Keychain** 存储（而非 UserDefaults/App Group），主 App 与键盘扩展通过 **Keychain Sharing**（同一 Keychain Access Group）共享。Keychain 是 Apple 推荐的敏感信息存储方式，具备硬件级加密保护。
+- **App Group UserDefaults**: 仅用于非敏感数据（STT 状态、识别结果文本、设置偏好）。
 
 ---
 
@@ -90,8 +98,11 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 **架构决策**:
 - 键盘扩展通过 `UIApplication.shared.open(url)` 拉起主 App（需 Full Access）
 - 主 App 用 `onOpenURL` 处理 URL Scheme
-- 键盘用 Timer 轮询 App Group UserDefaults 获取 partial/final 结果
+- **事件驱动通信**: 主 App 写入 UserDefaults 后通过 `CFNotificationCenterGetDarwinNotifyCenter` 发送 Darwin 通知，键盘扩展监听后立即读取结果。Timer 轮询（0.5s 间隔）仅作兜底机制
 - DraftCanvas 是一个 UITextView，用户可直接编辑文本
+- **错误处理**: 主 App 出错时写入 `vk_stt_error`（含具体错误信息：网络断开、API Key 无效、服务不可用等），键盘端在 DraftCanvas 中显示具体错误提示而非空白等待
+- **降级处理**: 键盘检测到主 App 未运行或无响应（URL Scheme 5s 内无状态变更）时显示"请手动打开 VoiceKey App"
+- API Key 迁移到 Keychain 存储，通过 Keychain Sharing 跨 target 共享
 
 **依赖**: 无（重构基础）
 
@@ -116,10 +127,12 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 **交互设计**:
 1. 点击 🎤 → 打开 DraftCanvas + 跳转主 App
 2. DraftCanvas 显示 "等待录音结果..."
-3. 主 App 录音完成 → DraftCanvas 显示结果
-4. 用户可在 DraftCanvas 中用键盘编辑文本
-5. 点击 ✓ 确认 → 文本通过 textDocumentProxy.insertText() 插入
-6. 点击 ✕ 取消 → 清空 DraftCanvas
+3. 主 App 出错 → DraftCanvas 显示具体错误（如"Soniox 服务不可用，请检查网络"、"API Key 无效"、"录音权限被拒绝"）
+4. 主 App 录音完成 → DraftCanvas 显示结果
+5. 用户可在 DraftCanvas 中用键盘编辑文本
+6. 点击 ✓ 确认 → 文本通过 textDocumentProxy.insertText() 插入
+7. 点击 ✕ 取消 → 清空 DraftCanvas
+8. 支持 Markdown 简单高亮预留（如命令模式返回的修改部分用蓝色标注），为 M7 做准备
 
 **依赖**: M3
 
@@ -136,6 +149,8 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 - `VoiceInputView.swift` — 录音界面显示当前语言
 
 **语言列表**: zhCN(普通话), zhYue(粤语), en, es, pt, fr, de, ja
+
+> **注意**: 粤语(zhYue)目前 Soniox/Groq 等服务商支持较弱（多为实验性），优先级较低。后续根据实际识别率决定是否保留或降级为"Beta"标签。
 
 **依赖**: M3, M4
 
@@ -184,12 +199,18 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 **修改文件**:
 - `KeyboardView.swift` — 启用编辑按钮
 - `KeyboardViewController.swift` — 编辑模式状态机：
-  1. 点击 ✏️ → 获取 DraftCanvas 中选中的文本
+  1. 点击 ✏️ → 获取 DraftCanvas 中选中的文本（UITextView.selectedRange）
   2. 通过 URL Scheme 跳转主 App 录音（命令模式）
   3. 主 App 识别语音命令
   4. 命令 + 选中文本 → LLM 处理
   5. 结果写回 DraftCanvas 替换选中文本
 - `VoiceInputView.swift` — 命令模式 UI
+
+**DraftCanvas 选中文本同步注意事项**:
+- UITextView 在键盘扩展里取 `selectedRange` 是可以的
+- 在键盘收起/切换 App 时，`textDocumentProxy` 的状态可能与 DraftCanvas 不同步
+- 确认插入前做一次 `textDocumentProxy.documentContextBeforeInput` 校验，确保插入位置与用户预期一致
+- 命令模式返回的修改部分用蓝色高亮标注差异，方便用户确认
 
 **依赖**: M4（DraftCanvas）, M6（LLM 引擎）
 
@@ -223,7 +244,14 @@ VoiceKey 是一个 iOS 键盘扩展 + 主 App，将语音实时转换为文字�
 - `VoiceKeyApp.swift` — 添加 `UIBackgroundModes: audio`
 - `Info.plist` — Background Audio entitlement
 
+**Info.plist 必需声明**（后台模式下可能被单独检查）:
+- `NSMicrophoneUsageDescription` — 麦克风权限说明
+- `NSSpeechRecognitionUsageDescription` — 语音识别权限说明（即使使用第三方 ASR 也建议声明）
+- `UIBackgroundModes: audio` — 后台音频
+
 **防熄屏**: 录音期间 `isIdleTimerDisabled = true`
+
+**电量保护**: 长录音场景增加剩余电量检测，电量 < 20% 时自动停止录音并保存已有结果，弹窗提示用户"电量不足，已自动保存"。通过 `UIDevice.current.batteryLevel` + `UIDevice.current.isBatteryMonitoringEnabled` 实现。
 
 **依赖**: M3, M6
 
@@ -301,3 +329,14 @@ VoiceKeyboard/                     ← 键盘扩展 target
 2. **模拟器测试**: 在 iOS Simulator 上验证 UI 交互
 3. **真机测试**: 在 iPhone 上安装，验证 URL Scheme 跳转、App Group 通信、录音功能
 4. **内存审计**: 键盘扩展 < 30MB，主 App < 100MB
+5. **单元测试覆盖**（M6+ 逐步补充）:
+   - `StreamingSTTProvider` 协议一致性
+   - `CommandParser` 命令解析（M7）
+   - `EditCommandExecutor` 命令执行（M7）
+   - `LLMProviderFactory` 工厂分支覆盖（M6）
+   - `VoiceKeyContract` 读写一致性
+6. **集成测试场景**:
+   - 主 App 被杀掉后键盘能否优雅降级（显示"主 App 未运行，请手动打开 VoiceKey"）
+   - URL Scheme 跳转后主 App 无响应的超时处理
+   - App Group UserDefaults 写入/读取跨进程一致性
+   - 长录音 + 后台音频 + 低电量自动保存
