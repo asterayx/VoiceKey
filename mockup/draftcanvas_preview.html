@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceKey DraftCanvas Mockup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  }
+
+  .phone-frame {
+    width: 393px;
+    height: 852px;
+    background: #000;
+    border-radius: 47px;
+    padding: 12px;
+    position: relative;
+    box-shadow: 0 25px 80px rgba(0,0,0,0.5), 0 0 0 2px #333;
+  }
+
+  .phone-screen {
+    width: 100%;
+    height: 100%;
+    background: #f2f2f7;
+    border-radius: 39px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Dynamic Island */
+  .dynamic-island {
+    position: absolute;
+    top: 22px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 126px;
+    height: 37px;
+    background: #000;
+    border-radius: 20px;
+    z-index: 10;
+  }
+
+  /* Status Bar */
+  .status-bar {
+    height: 54px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 0 28px 6px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #000;
+  }
+  .status-bar .time { font-size: 16px; font-weight: 700; }
+  .status-bar .icons { display: flex; gap: 5px; align-items: center; font-size: 13px; }
+  .status-bar .icons svg { width: 16px; height: 12px; }
+
+  /* Host App - Notes style */
+  .host-app {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+  }
+
+  .nav-bar {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    border-bottom: 0.5px solid #c6c6c8;
+    background: #f8f8fa;
+  }
+  .nav-bar .back {
+    color: #007aff;
+    font-size: 17px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .nav-bar .back svg { width: 12px; height: 20px; }
+  .nav-bar .title {
+    flex: 1;
+    text-align: center;
+    font-size: 17px;
+    font-weight: 600;
+    color: #000;
+  }
+  .nav-bar .action {
+    color: #007aff;
+    font-size: 17px;
+  }
+
+  .notes-content {
+    flex: 1;
+    padding: 16px;
+    font-size: 16px;
+    line-height: 1.5;
+    color: #000;
+    overflow-y: auto;
+  }
+  .notes-content .note-title {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    color: #000;
+  }
+  .notes-content .note-body {
+    color: #333;
+    line-height: 1.6;
+  }
+  .notes-content .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 18px;
+    background: #007aff;
+    animation: blink 1s infinite;
+    vertical-align: text-bottom;
+    margin-left: 1px;
+  }
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+
+  /* Keyboard area */
+  .keyboard-area {
+    background: #d1d3d9;
+  }
+
+  /* DraftCanvas */
+  .draft-canvas {
+    margin: 4px 4px 0;
+    background: #efeff4;
+    border-radius: 8px;
+    border: 0.5px solid #c6c6c8;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    height: 80px;
+    position: relative;
+  }
+
+  .draft-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 3px 8px 0;
+    height: 20px;
+  }
+  .draft-status {
+    font-size: 11px;
+    font-weight: 500;
+    color: #34c759;
+  }
+  .draft-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .draft-btn-confirm {
+    width: 26px;
+    height: 26px;
+    background: #34c759;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .draft-btn-cancel {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #c7c7cc;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .draft-text {
+    flex: 1;
+    padding: 2px 8px 4px;
+    font-size: 15px;
+    color: #000;
+    line-height: 1.35;
+    overflow-y: auto;
+  }
+  .draft-text .partial {
+    color: #c7c7cc;
+    font-style: italic;
+  }
+  .draft-text .selection {
+    background: #b4d8fd;
+    border-radius: 2px;
+  }
+
+  /* Keyboard Keys */
+  .keyboard-rows {
+    padding: 6px 3px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .key-row {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    height: 43px;
+  }
+
+  .key {
+    background: #fff;
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    color: #000;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.3);
+    min-width: 32px;
+    flex: 1;
+    max-width: 38px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .key:active { background: #b8b8c0; }
+
+  .key-action {
+    background: #adb3bc;
+    color: #000;
+    font-size: 16px;
+    min-width: 42px;
+    max-width: 48px;
+    flex: 1.3;
+  }
+  .key-action svg { width: 22px; height: 22px; fill: #000; }
+
+  .key-space {
+    flex: 4;
+    max-width: none;
+    font-size: 16px;
+    color: #000;
+  }
+
+  .key-small {
+    font-size: 16px;
+    min-width: 36px;
+    max-width: 42px;
+  }
+
+  .key-return {
+    font-size: 15px;
+    min-width: 58px;
+    max-width: 68px;
+    flex: 1.6;
+  }
+
+  .key-mic {
+    background: #adb3bc;
+    position: relative;
+  }
+  .key-mic.waiting {
+    background: #ff9500;
+  }
+  .key-mic.waiting svg { fill: #fff; }
+  .key-mic svg { width: 20px; height: 20px; fill: #000; }
+
+  .key-edit { background: #adb3bc; }
+  .key-edit svg { width: 18px; height: 18px; fill: #000; }
+
+  .key-globe { background: #adb3bc; }
+  .key-globe svg { width: 20px; height: 20px; fill: #000; }
+
+  /* Row 1 centered */
+  .row-1-centered {
+    padding: 0 16px;
+  }
+
+  /* Bottom safe area */
+  .safe-area {
+    height: 34px;
+    background: #d1d3d9;
+  }
+
+  /* Label overlay */
+  .label-overlay {
+    position: absolute;
+    bottom: -40px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 14px;
+    color: #999;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  /* Annotations */
+  .annotations {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none;
+  }
+
+  .annotation {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    pointer-events: none;
+  }
+  .annotation-line {
+    width: 60px;
+    height: 2px;
+    background: #ff6b6b;
+  }
+  .annotation-text {
+    font-size: 13px;
+    color: #ff6b6b;
+    font-weight: 600;
+    white-space: nowrap;
+    background: rgba(26,26,46,0.85);
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid #ff6b6b;
+  }
+
+  .ann-draft {
+    top: 504px;
+    right: -170px;
+  }
+  .ann-host {
+    top: 320px;
+    right: -130px;
+  }
+  .ann-keyboard {
+    top: 680px;
+    right: -120px;
+  }
+
+  .wrapper {
+    position: relative;
+    padding: 30px 200px 60px 30px;
+  }
+
+  .title-card {
+    position: absolute;
+    top: -10px;
+    left: 50%;
+    transform: translateX(-40%);
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    white-space: nowrap;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .title-card .sub {
+    font-size: 13px;
+    font-weight: 400;
+    color: #888;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrapper">
+  <div class="title-card">
+    VoiceKey — DraftCanvas Preview
+    <br><span class="sub">键盘扩展内文本预览/编辑区域</span>
+  </div>
+
+  <div class="phone-frame">
+    <div class="dynamic-island"></div>
+    <div class="phone-screen">
+
+      <!-- Status Bar -->
+      <div class="status-bar">
+        <span class="time">9:41</span>
+        <span class="icons">
+          <svg viewBox="0 0 17 12"><path d="M1 4h2v8H1zM5 2.5h2V12H5zM9 1h2v11H9zM13 0h2v12h-2z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 16 12"><path d="M8 2C5.2 2 2.7 3.1.9 4.9l1.4 1.4C3.8 4.8 5.8 4 8 4s4.2.8 5.7 2.3l1.4-1.4C13.3 3.1 10.8 2 8 2zm0 4c-1.7 0-3.2.7-4.2 1.8L5.2 9.2C5.9 8.5 6.9 8 8 8s2.1.5 2.8 1.2l1.4-1.4C11.2 6.7 9.7 6 8 6zm0 4c-.8 0-1.6.3-2.1.9L8 13l2.1-2.1c-.5-.6-1.3-.9-2.1-.9z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 25 12"><rect x="0" y="1" width="22" height="10" rx="2.5" ry="2.5" stroke="currentColor" stroke-width="1" fill="none"/><rect x="23" y="4" width="2" height="4" rx="0.5" fill="currentColor"/><rect x="2" y="3" width="14" height="6" rx="1" fill="#34c759"/></svg>
+        </span>
+      </div>
+
+      <!-- Host App (Notes) -->
+      <div class="host-app">
+        <div class="nav-bar">
+          <span class="back">
+            <svg viewBox="0 0 12 20"><path d="M10 2L2 10l8 8" stroke="#007aff" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
+            备忘录
+          </span>
+          <span class="title"></span>
+          <span class="action">完成</span>
+        </div>
+        <div class="notes-content">
+          <div class="note-title">会议纪要 03/28</div>
+          <div class="note-body">
+            参会人：张三、李四、王五<br><br>
+            1. Q1 营收达到预期目标，同比增长 23%<br>
+            2. 新产品发布时间推迟到四月中旬<br>
+            3. 需要增加两名前端工程师<span class="cursor"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keyboard Area -->
+      <div class="keyboard-area">
+
+        <!-- DraftCanvas -->
+        <div class="draft-canvas">
+          <div class="draft-header">
+            <span class="draft-status">● 识别完成</span>
+            <div class="draft-actions">
+              <div class="draft-btn-confirm">✓</div>
+              <div class="draft-btn-cancel">✕</div>
+            </div>
+          </div>
+          <div class="draft-text">
+            下周一之前需要完成技术方案评审，<span class="selection">周三</span>安排客户演示<span class="partial">，预计需要准备...</span>
+          </div>
+        </div>
+
+        <!-- Keyboard -->
+        <div class="keyboard-rows">
+          <!-- Row 0 -->
+          <div class="key-row">
+            <div class="key">q</div>
+            <div class="key">w</div>
+            <div class="key">e</div>
+            <div class="key">r</div>
+            <div class="key">t</div>
+            <div class="key">y</div>
+            <div class="key">u</div>
+            <div class="key">i</div>
+            <div class="key">o</div>
+            <div class="key">p</div>
+          </div>
+          <!-- Row 1 -->
+          <div class="key-row row-1-centered">
+            <div class="key">a</div>
+            <div class="key">s</div>
+            <div class="key">d</div>
+            <div class="key">f</div>
+            <div class="key">g</div>
+            <div class="key">h</div>
+            <div class="key">j</div>
+            <div class="key">k</div>
+            <div class="key">l</div>
+          </div>
+          <!-- Row 2 -->
+          <div class="key-row">
+            <div class="key key-action">
+              <svg viewBox="0 0 24 24"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z" transform="rotate(-90 12 12)"/></svg>
+            </div>
+            <div class="key">z</div>
+            <div class="key">x</div>
+            <div class="key">c</div>
+            <div class="key">v</div>
+            <div class="key">b</div>
+            <div class="key">n</div>
+            <div class="key">m</div>
+            <div class="key key-action">
+              <svg viewBox="0 0 24 24"><path d="M22 3H7c-.69 0-1.23.35-1.59.88L0 12l5.41 8.11c.36.53.9.89 1.59.89h15c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-3 12.59L17.59 17 14 13.41 10.41 17 9 15.59 12.59 12 9 8.41 10.41 7 14 10.59 17.59 7 19 8.41 15.41 12 19 15.59z"/></svg>
+            </div>
+          </div>
+          <!-- Row 3 -->
+          <div class="key-row">
+            <div class="key key-small key-globe">
+              <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+            </div>
+            <div class="key key-small key-action">123</div>
+            <div class="key key-small key-action" style="color:#000;font-size:15px;font-weight:600;">中</div>
+            <div class="key key-space">space</div>
+            <div class="key key-small key-edit">
+              <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+            </div>
+            <div class="key key-small key-mic waiting">
+              <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+            </div>
+            <div class="key key-small key-return key-action" style="font-size:13px;">return</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Safe Area -->
+      <div class="safe-area"></div>
+
+    </div>
+  </div>
+
+  <!-- Annotations -->
+  <div class="annotations">
+    <div class="annotation ann-host">
+      <div class="annotation-line"></div>
+      <div class="annotation-text">宿主 App (备忘录)</div>
+    </div>
+    <div class="annotation ann-draft">
+      <div class="annotation-line"></div>
+      <div class="annotation-text">DraftCanvas 预览区</div>
+    </div>
+    <div class="annotation ann-keyboard">
+      <div class="annotation-line"></div>
+      <div class="annotation-text">VoiceKey 键盘</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
