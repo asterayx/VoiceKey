@@ -79,7 +79,7 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         stopPolling()
-        VoiceKeyContract.removeDarwinObserver()
+        VoiceKeyContract.removeAllObservers()
     }
 
     // MARK: - UI Setup
@@ -177,7 +177,10 @@ final class KeyboardViewController: UIInputViewController {
         VoiceKeyContract.resetSession()
     }
 
-    // MARK: - Recording trigger (URL Scheme)
+    /// Whether we are currently in a recording session.
+    private var isRecordingSession = false
+
+    // MARK: - Recording trigger (IPC or URL Scheme)
 
     private func triggerRecording() {
         guard hasFullAccess else {
@@ -191,14 +194,39 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        // If already recording, this is a "stop" tap
+        if isRecordingSession {
+            stopRecordingSession()
+            return
+        }
+
         // Show draft canvas in waiting state
         draftCanvas.showWaiting()
         showDraftCanvas()
 
-        // Launch main app via URL Scheme
-        guard let url = URL(string: VoiceKeyContract.urlSchemeRecord) else { return }
+        // Listen for Darwin notifications
+        startListening()
 
-        // UIApplication.shared is available in keyboard extensions with Full Access
+        if VoiceKeyContract.isAppAlive() {
+            // Main app is alive in background — send command via Darwin Notification (no app switch!)
+            VoiceKeyContract.sendCommand(.startRecording)
+            isRecordingSession = true
+        } else {
+            // Main app not running — need URL Scheme to activate it
+            activateMainApp()
+        }
+    }
+
+    private func stopRecordingSession() {
+        VoiceKeyContract.sendCommand(.stopRecording)
+        isRecordingSession = false
+        draftCanvas.showProcessing()
+    }
+
+    /// Launch main app via URL Scheme (first activation / reactivation only).
+    private func activateMainApp() {
+        guard let url = URL(string: VoiceKeyContract.urlSchemeActivate) else { return }
+
         var responder: UIResponder? = self
         while let r = responder {
             if let app = r as? UIApplication {
@@ -207,9 +235,6 @@ final class KeyboardViewController: UIInputViewController {
             }
             responder = r.next
         }
-
-        // Listen for Darwin notifications (event-driven, immediate)
-        startListening()
 
         // Start launch timeout — if main app doesn't respond within 5s, show error
         launchTimeoutTimer?.invalidate()
@@ -228,7 +253,7 @@ final class KeyboardViewController: UIInputViewController {
         stopPolling()
 
         // Primary: Darwin notification (immediate, event-driven)
-        VoiceKeyContract.observeDarwinNotification { [weak self] in
+        VoiceKeyContract.observeNotification(VoiceKeyContract.notifySTTUpdate) { [weak self] in
             self?.cancelLaunchTimeout()
             self?.checkForPendingResult()
         }
@@ -242,7 +267,7 @@ final class KeyboardViewController: UIInputViewController {
     private func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
-        VoiceKeyContract.removeDarwinObserver()
+        VoiceKeyContract.removeObserver(for: VoiceKeyContract.notifySTTUpdate)
     }
 
     private func cancelLaunchTimeout() {
@@ -275,12 +300,15 @@ final class KeyboardViewController: UIInputViewController {
 
         case .done:
             cancelLaunchTimeout()
+            isRecordingSession = false
             let timestamp = VoiceKeyContract.currentTimestamp()
             guard timestamp > lastResultTimestamp else { return }
             lastResultTimestamp = timestamp
 
             let result = VoiceKeyContract.currentResult()
             if !result.isEmpty {
+                // TODO: Add user preference for direct-insert vs DraftCanvas mode.
+                // For now, always use DraftCanvas for review before insertion.
                 draftCanvas.showResult(result)
                 if draftCanvas.isHidden {
                     showDraftCanvas()

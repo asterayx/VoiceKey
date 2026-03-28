@@ -5,9 +5,10 @@
 //  Shared communication protocol between the main app and keyboard extension.
 //  Both targets must include this file.
 //
-//  Communication flow:
-//    Keyboard → Main App:  URL Scheme (voicekey://record, voicekey://command)
-//    Main App → Keyboard:  App Group UserDefaults (status, result, partial)
+//  Communication flow (bidirectional Darwin Notification IPC):
+//    Keyboard → Main App:  Darwin Notification (command) + App Group UserDefaults
+//    Main App → Keyboard:  Darwin Notification (update)  + App Group UserDefaults
+//    Keyboard → Main App:  URL Scheme (first activation / reactivation only)
 //
 
 import Foundation
@@ -18,17 +19,21 @@ enum VoiceKeyContract {
 
     static let appGroupID = "group.com.asterayx.voicekey"
 
-    /// URL Scheme for launching the main app from the keyboard extension.
-    static let urlSchemeRecord  = "voicekey://record"
-    static let urlSchemeCommand = "voicekey://command"
+    /// URL Scheme for first-time activation (launches main app to start background audio).
+    /// Only used when main app is not running in background.
+    static let urlSchemeActivate = "voicekey://activate"
 
-    /// Darwin notification name for cross-process event-driven updates.
-    /// Main app posts this after writing to UserDefaults; keyboard listens.
-    static let darwinNotificationName = "com.asterayx.voicekey.sttUpdate" as CFString
+    // MARK: - Darwin Notification Names
+
+    /// Main app → keyboard: STT status/result updated, read from UserDefaults.
+    static let notifySTTUpdate = "com.asterayx.voicekey.sttUpdate" as CFString
+    /// Keyboard → main app: command issued, read vk_command from UserDefaults.
+    static let notifyCommand   = "com.asterayx.voicekey.command" as CFString
 
     // MARK: - UserDefaults Keys
 
     enum Key {
+        // --- Main App → Keyboard (STT results) ---
         /// Current STT session status (String raw value of VKStatus).
         static let sttStatus    = "vk_stt_status"
         /// Final recognized text from STT.
@@ -36,9 +41,20 @@ enum VoiceKeyContract {
         /// Partial (streaming) text update from STT.
         static let sttPartial   = "vk_stt_partial"
         /// Timestamp (TimeInterval) of the last result write — used for dedup.
-        static let sttTimestamp = "vk_stt_timestamp"
+        static let sttTimestamp  = "vk_stt_timestamp"
         /// Error message if status == .error.
         static let sttError     = "vk_stt_error"
+
+        // --- Keyboard → Main App (commands) ---
+        /// Command type (String raw value of VKCommand).
+        static let command          = "vk_command"
+        /// Command timestamp (TimeInterval) — used for dedup.
+        static let commandTimestamp = "vk_command_timestamp"
+
+        // --- Heartbeat (Main App liveness) ---
+        /// TimeInterval written by main app every ~5s while background audio is active.
+        /// Keyboard checks this to decide URL Scheme vs Darwin Notification.
+        static let appAlive = "vk_app_alive"
     }
 
     // MARK: - Shared UserDefaults accessor
@@ -58,67 +74,40 @@ enum VKStatus: String {
     case error
 }
 
-// MARK: - Write helpers (used by main app)
+// MARK: - Commands (Keyboard → Main App)
+
+enum VKCommand: String {
+    case startRecording
+    case stopRecording
+    case cancel
+}
+
+// MARK: - Write helpers (used by main app → keyboard)
 
 extension VoiceKeyContract {
 
     static func setStatus(_ status: VKStatus) {
         sharedDefaults?.set(status.rawValue, forKey: Key.sttStatus)
-        postDarwinNotification()
+        postNotification(notifySTTUpdate)
     }
 
     static func setPartialText(_ text: String) {
         sharedDefaults?.set(text, forKey: Key.sttPartial)
-        postDarwinNotification()
+        postNotification(notifySTTUpdate)
     }
 
     static func setResult(_ text: String) {
         sharedDefaults?.set(text, forKey: Key.sttResult)
         sharedDefaults?.set(Date().timeIntervalSince1970, forKey: Key.sttTimestamp)
         sharedDefaults?.set(VKStatus.done.rawValue, forKey: Key.sttStatus)
-        postDarwinNotification()
+        postNotification(notifySTTUpdate)
     }
 
     static func setError(_ message: String) {
         sharedDefaults?.set(message, forKey: Key.sttError)
         sharedDefaults?.set(VKStatus.error.rawValue, forKey: Key.sttStatus)
-        postDarwinNotification()
+        postNotification(notifySTTUpdate)
     }
-
-    // MARK: - Darwin notification (event-driven cross-process communication)
-
-    /// Post a Darwin notification so the keyboard extension can react immediately
-    /// instead of waiting for the next poll cycle. Call after every UserDefaults write.
-    static func postDarwinNotification() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterPostNotification(center, CFNotificationName(darwinNotificationName), nil, nil, true)
-    }
-
-    /// Register to receive Darwin notifications (call from keyboard extension).
-    /// - Parameter callback: Invoked on the main thread when the main app updates state.
-    static func observeDarwinNotification(callback: @escaping () -> Void) {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        _darwinCallback = callback
-        CFNotificationCenterAddObserver(
-            center, nil,
-            { _, _, _, _, _ in
-                DispatchQueue.main.async { _darwinCallback?() }
-            },
-            darwinNotificationName,
-            nil,
-            .deliverImmediately
-        )
-    }
-
-    /// Remove Darwin notification observer (call from keyboard extension on dealloc).
-    static func removeDarwinObserver() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterRemoveObserver(center, nil, CFNotificationName(darwinNotificationName), nil)
-        _darwinCallback = nil
-    }
-
-    /// Stored callback for Darwin notification (global, only one observer at a time).
-    private static var _darwinCallback: (() -> Void)?
 
     static func resetSession() {
         let defaults = sharedDefaults
@@ -127,6 +116,23 @@ extension VoiceKeyContract {
         defaults?.removeObject(forKey: Key.sttPartial)
         defaults?.removeObject(forKey: Key.sttTimestamp)
         defaults?.removeObject(forKey: Key.sttError)
+    }
+
+    /// Write heartbeat timestamp (call from main app on a 5s timer).
+    static func updateHeartbeat() {
+        sharedDefaults?.set(Date().timeIntervalSince1970, forKey: Key.appAlive)
+    }
+}
+
+// MARK: - Write helpers (used by keyboard → main app)
+
+extension VoiceKeyContract {
+
+    /// Send a command to the main app via App Group + Darwin Notification.
+    static func sendCommand(_ command: VKCommand) {
+        sharedDefaults?.set(command.rawValue, forKey: Key.command)
+        sharedDefaults?.set(Date().timeIntervalSince1970, forKey: Key.commandTimestamp)
+        postNotification(notifyCommand)
     }
 }
 
@@ -154,4 +160,87 @@ extension VoiceKeyContract {
     static func currentError() -> String {
         sharedDefaults?.string(forKey: Key.sttError) ?? ""
     }
+
+    /// Check if the main app is alive in background (heartbeat within last 10s).
+    static func isAppAlive() -> Bool {
+        let lastHeartbeat = sharedDefaults?.double(forKey: Key.appAlive) ?? 0
+        guard lastHeartbeat > 0 else { return false }
+        return Date().timeIntervalSince1970 - lastHeartbeat < 10.0
+    }
+}
+
+// MARK: - Read helpers (used by main app to receive commands)
+
+extension VoiceKeyContract {
+
+    static func currentCommand() -> VKCommand? {
+        guard let raw = sharedDefaults?.string(forKey: Key.command) else { return nil }
+        return VKCommand(rawValue: raw)
+    }
+
+    static func currentCommandTimestamp() -> TimeInterval {
+        sharedDefaults?.double(forKey: Key.commandTimestamp) ?? 0
+    }
+
+    static func clearCommand() {
+        sharedDefaults?.removeObject(forKey: Key.command)
+        sharedDefaults?.removeObject(forKey: Key.commandTimestamp)
+    }
+}
+
+// MARK: - Darwin Notification Helpers
+
+extension VoiceKeyContract {
+
+    /// Post a Darwin notification.
+    static func postNotification(_ name: CFString) {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName(name), nil, nil, true)
+    }
+
+    /// Register to observe a Darwin notification.
+    /// - Parameters:
+    ///   - name: The notification name to observe.
+    ///   - callback: Invoked on the main thread when notification is received.
+    static func observeNotification(_ name: CFString, callback: @escaping () -> Void) {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+
+        // Store callback in the appropriate slot
+        if name == notifySTTUpdate {
+            _sttUpdateCallback = callback
+        } else if name == notifyCommand {
+            _commandCallback = callback
+        }
+
+        let cfCallback: CFNotificationCallback = { _, _, notifName, _, _ in
+            DispatchQueue.main.async {
+                guard let n = notifName?.rawValue as CFString? else { return }
+                if n == VoiceKeyContract.notifySTTUpdate {
+                    VoiceKeyContract._sttUpdateCallback?()
+                } else if n == VoiceKeyContract.notifyCommand {
+                    VoiceKeyContract._commandCallback?()
+                }
+            }
+        }
+
+        CFNotificationCenterAddObserver(center, nil, cfCallback, name, nil, .deliverImmediately)
+    }
+
+    /// Remove observer for a specific Darwin notification.
+    static func removeObserver(for name: CFString) {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterRemoveObserver(center, nil, CFNotificationName(name), nil)
+        if name == notifySTTUpdate { _sttUpdateCallback = nil }
+        if name == notifyCommand   { _commandCallback = nil }
+    }
+
+    /// Remove all Darwin notification observers.
+    static func removeAllObservers() {
+        removeObserver(for: notifySTTUpdate)
+        removeObserver(for: notifyCommand)
+    }
+
+    // Stored callbacks (global, one per notification type)
+    private static var _sttUpdateCallback: (() -> Void)?
+    private static var _commandCallback: (() -> Void)?
 }
