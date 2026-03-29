@@ -31,7 +31,7 @@ enum STTProviderFactory {
             return SonioxStreamingService(
                 apiKey: apiKey,
                 languageHints: hints,
-                model: model ?? "soniox_multilingual"
+                model: model ?? engine.fallbackModels.first ?? "soniox_multilingual"
             )
 
         case .groq:
@@ -41,7 +41,7 @@ enum STTProviderFactory {
                 apiKey: apiKey,
                 language: lang,
                 prompt: prompt,
-                model: model ?? "whisper-large-v3"
+                model: model ?? engine.fallbackModels.first ?? "whisper-large-v3"
             )
 
         case .cerebras:
@@ -51,7 +51,7 @@ enum STTProviderFactory {
                 apiKey: apiKey,
                 language: lang,
                 prompt: prompt,
-                model: model ?? "whisper-large-v3"
+                model: model ?? engine.fallbackModels.first ?? "whisper-large-v3"
             )
 
         case .deepgram:

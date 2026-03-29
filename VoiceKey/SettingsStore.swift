@@ -90,8 +90,8 @@ enum STTEngine: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Available models for this engine.
-    var availableModels: [String] {
+    /// Fallback models when remote API listing is unavailable.
+    var fallbackModels: [String] {
         switch self {
         case .soniox:
             return ["soniox_multilingual", "soniox_english"]
@@ -102,11 +102,6 @@ enum STTEngine: String, CaseIterable, Identifiable {
         case .deepgram:
             return ["nova-3", "nova-2"]
         }
-    }
-
-    /// Default model for this engine.
-    var defaultModel: String {
-        availableModels.first ?? ""
     }
 }
 
@@ -254,12 +249,7 @@ final class SettingsStore: ObservableObject {
         let styleRaw = suite.string(forKey: Key.outputStyle) ?? OutputStyle.raw.rawValue
         self.outputStyle = OutputStyle(rawValue: styleRaw) ?? .raw
 
-        // STT model — default to engine's first model if empty
-        let savedModel = suite.string(forKey: Key.sttModel) ?? ""
-        if savedModel.isEmpty {
-            self.sttModel = self.sttEngine.defaultModel
-        } else {
-            self.sttModel = savedModel
-        }
+        // STT model — saved from last API test + model selection
+        self.sttModel = suite.string(forKey: Key.sttModel) ?? ""
     }
 }

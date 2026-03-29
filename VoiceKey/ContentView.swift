@@ -10,6 +10,8 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var settings = SettingsStore.shared
     @State private var apiTestState: APITestState = .idle
+    @State private var fetchedModels: [String] = []
+    @State private var isFetchingModels = false
 
     var body: some View {
         NavigationStack {
@@ -22,21 +24,11 @@ struct ContentView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .onChange(of: settings.sttEngine) { _, newEngine in
-                        // Set default model when switching engine
-                        if settings.sttModel.isEmpty || !newEngine.availableModels.contains(settings.sttModel) {
-                            settings.sttModel = newEngine.defaultModel
-                        }
+                    .onChange(of: settings.sttEngine) { _, _ in
                         apiTestState = .idle
+                        fetchedModels = []
+                        settings.sttModel = ""
                     }
-
-                    // Model picker
-                    Picker("Model", selection: $settings.sttModel) {
-                        ForEach(settings.sttEngine.availableModels, id: \.self) { model in
-                            Text(model).tag(model)
-                        }
-                    }
-                    .pickerStyle(.menu)
 
                     if !settings.sttEngine.supportsStreaming {
                         Label("此引擎不支持实时流式识别，录音结束后统一处理",
@@ -55,6 +47,22 @@ struct ContentView: View {
                               hint: "cloud.cerebras.ai", engine: .cerebras)
                 apiKeySection(title: "Deepgram", key: $settings.deepgramAPIKey,
                               hint: "console.deepgram.com", engine: .deepgram)
+
+                // MARK: - Model Selection (shown after successful API test)
+                if !fetchedModels.isEmpty {
+                    Section {
+                        Picker("Model", selection: $settings.sttModel) {
+                            ForEach(fetchedModels, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    } header: {
+                        Text("Model")
+                    } footer: {
+                        Text("从 \(settings.sttEngine.displayName) 远程获取的可用模型")
+                    }
+                }
 
                 // MARK: - Languages
                 Section {
@@ -82,6 +90,7 @@ struct ContentView: View {
                 // MARK: - Status
                 Section("Status") {
                     statusRow("Active Engine", value: settings.sttEngine.displayName)
+                    statusRow("Model", value: settings.sttModel.isEmpty ? "未选择" : settings.sttModel)
                     statusRow("Languages",
                               value: settings.activeLanguages.map(\.shortLabel).joined(separator: ", "))
 
@@ -113,7 +122,10 @@ struct ContentView: View {
                 .textContentType(.password)
                 .autocorrectionDisabled()
                 .onChange(of: key.wrappedValue) { _, _ in
-                    if settings.sttEngine == engine { apiTestState = .idle }
+                    if settings.sttEngine == engine {
+                        apiTestState = .idle
+                        fetchedModels = []
+                    }
                 }
 
             if settings.sttEngine == engine && !key.wrappedValue.isEmpty {
@@ -127,9 +139,9 @@ struct ContentView: View {
                         case .testing:
                             ProgressView()
                                 .controlSize(.small)
-                            Text("测试中...")
+                            Text(isFetchingModels ? "获取模型列表..." : "验证中...")
                         case .success:
-                            Label("连接成功", systemImage: "checkmark.circle.fill")
+                            Label("验证通过", systemImage: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
                         case .failure(let msg):
                             Label(msg, systemImage: "xmark.circle.fill")
@@ -179,7 +191,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - API Key Test
+// MARK: - API Key Test & Model Fetch
 
 enum APITestState: Equatable {
     case idle
@@ -192,20 +204,23 @@ extension ContentView {
 
     func testAPIKey(engine: STTEngine, apiKey: String) {
         apiTestState = .testing
+        isFetchingModels = false
+        fetchedModels = []
 
         switch engine {
         case .soniox:
             testSonioxKey(apiKey: apiKey)
         case .groq:
-            testWhisperKey(apiKey: apiKey, endpoint: "https://api.groq.com/openai/v1/models")
+            testAndFetchModels(apiKey: apiKey, endpoint: "https://api.groq.com/openai/v1/models", engine: engine)
         case .cerebras:
-            testWhisperKey(apiKey: apiKey, endpoint: "https://api.cerebras.ai/v1/models")
+            testAndFetchModels(apiKey: apiKey, endpoint: "https://api.cerebras.ai/v1/models", engine: engine)
         case .deepgram:
-            testWhisperKey(apiKey: apiKey, endpoint: "https://api.deepgram.com/v1/projects")
+            testAndFetchModels(apiKey: apiKey, endpoint: "https://api.deepgram.com/v1/projects", engine: engine)
         }
     }
 
     /// Test Soniox by opening a WebSocket and sending config.
+    /// Soniox doesn't have a REST models endpoint, so use hardcoded list on success.
     private func testSonioxKey(apiKey: String) {
         let url = URL(string: "wss://api.soniox.com/transcribe-websocket")!
         let session = URLSession(configuration: .default)
@@ -233,12 +248,16 @@ extension ContentView {
                 return
             }
 
-            // Try to receive a response — if auth fails, server closes with error
             task.receive { result in
                 DispatchQueue.main.async {
                     switch result {
                     case .success:
                         apiTestState = .success
+                        // Soniox has no models listing API; use known models
+                        fetchedModels = STTEngine.soniox.fallbackModels
+                        if settings.sttModel.isEmpty {
+                            settings.sttModel = fetchedModels.first ?? ""
+                        }
                     case .failure(let error):
                         let msg = error.localizedDescription
                         if msg.contains("57") || msg.contains("Socket is not connected") {
@@ -251,13 +270,12 @@ extension ContentView {
                 }
             }
 
-            // Send empty data to trigger end-of-audio, so server responds
             task.send(.data(Data())) { _ in }
         }
     }
 
-    /// Test Groq/Cerebras/Deepgram by calling their models endpoint.
-    private func testWhisperKey(apiKey: String, endpoint: String) {
+    /// Test key via /models endpoint, then parse available models.
+    private func testAndFetchModels(apiKey: String, endpoint: String, engine: STTEngine) {
         guard let url = URL(string: endpoint) else {
             apiTestState = .failure("无效的 URL")
             return
@@ -267,7 +285,7 @@ extension ContentView {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10
 
-        URLSession.shared.dataTask(with: request) { _, response, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 if let error {
                     apiTestState = .failure("网络错误: \(error.localizedDescription)")
@@ -279,6 +297,19 @@ extension ContentView {
                 }
                 switch httpResponse.statusCode {
                 case 200:
+                    isFetchingModels = true
+                    let models = parseModels(from: data, engine: engine)
+                    if models.isEmpty {
+                        // API valid but no models parsed — use fallback
+                        fetchedModels = engine.fallbackModels
+                    } else {
+                        fetchedModels = models
+                    }
+                    // Auto-select first model if none selected
+                    if settings.sttModel.isEmpty || !fetchedModels.contains(settings.sttModel) {
+                        settings.sttModel = fetchedModels.first ?? ""
+                    }
+                    isFetchingModels = false
                     apiTestState = .success
                 case 401:
                     apiTestState = .failure("API Key 无效 (401)")
@@ -289,6 +320,27 @@ extension ContentView {
                 }
             }
         }.resume()
+    }
+
+    /// Parse model IDs from OpenAI-compatible /v1/models response.
+    /// Filters for STT-relevant models (whisper, speech, audio, transcri).
+    private func parseModels(from data: Data?, engine: STTEngine) -> [String] {
+        guard let data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArray = json["data"] as? [[String: Any]] else {
+            return []
+        }
+
+        let sttKeywords = ["whisper", "speech", "audio", "transcri", "stt", "asr"]
+
+        let allModelIDs = dataArray.compactMap { $0["id"] as? String }
+
+        let sttModels = allModelIDs.filter { id in
+            let lower = id.lowercased()
+            return sttKeywords.contains { lower.contains($0) }
+        }.sorted()
+
+        return sttModels
     }
 }
 
