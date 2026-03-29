@@ -104,6 +104,9 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         let config: [String: Any] = [
             "api_key": apiKey,
             "model": model,
+            "audio_format": "pcm_s16le",
+            "sample_rate": 16000,
+            "num_channels": 1,
             "language_hints": languageHints,
             "include_nonfinal": true,
             "enable_endpoint_detection": true
