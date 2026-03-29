@@ -165,6 +165,14 @@ final class BackgroundAudioManager: ObservableObject {
     }
 
     private func performStartRecording(settings: SettingsStore, apiKey: String) {
+        // Clean up any lingering provider from a previous session to prevent
+        // stale delegate callbacks interfering with this new session.
+        if let old = sttProvider {
+            old.delegate = nil
+            old.disconnect()
+            sttProvider = nil
+        }
+
         committedText = ""
         partialText = ""
         hasFinalized = false
@@ -222,8 +230,11 @@ final class BackgroundAudioManager: ObservableObject {
             sttProvider?.finishAudio()
             audioService.stopCapture()
             VoiceKeyContract.setStatus(.processing)
-            // Give streaming provider a moment to flush final tokens
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            // Primary finalization happens via sttProviderDidDisconnect when Soniox
+            // closes the WebSocket after sending all remaining tokens.
+            // This timer is a safety net only — if the server never closes the connection,
+            // finalize after 10s with whatever text we have.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
                 self?.finalizeResult()
             }
         } else {
