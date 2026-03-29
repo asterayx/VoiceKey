@@ -80,6 +80,7 @@ final class BackgroundAudioManager: ObservableObject {
     // STT accumulation
     private var committedText = ""
     private var partialText = ""
+    private var hasFinalized = false
 
     private init() {}
 
@@ -128,7 +129,7 @@ final class BackgroundAudioManager: ObservableObject {
 
     // MARK: - Recording
 
-    private func startRecording() {
+    func startRecording() {
         guard !isRecording else { return }
 
         let settings = SettingsStore.shared
@@ -166,6 +167,7 @@ final class BackgroundAudioManager: ObservableObject {
     private func performStartRecording(settings: SettingsStore, apiKey: String) {
         committedText = ""
         partialText = ""
+        hasFinalized = false
 
         // Create STT provider
         let provider = STTProviderFactory.makeProvider(
@@ -205,7 +207,7 @@ final class BackgroundAudioManager: ObservableObject {
         }
     }
 
-    private func stopRecording() {
+    func stopRecording() {
         guard isRecording else { return }
         isRecording = false
 
@@ -246,6 +248,9 @@ final class BackgroundAudioManager: ObservableObject {
     }
 
     private func finalizeResult() {
+        guard !hasFinalized else { return }
+        hasFinalized = true
+
         let fullText = committedText + partialText
         guard !fullText.isEmpty else {
             VoiceKeyContract.setStatus(.idle)
@@ -302,10 +307,7 @@ extension BackgroundAudioManager: STTProviderDelegate {
 
     func sttProviderDidDisconnect(_ provider: any StreamingSTTProvider) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if !self.committedText.isEmpty {
-                self.finalizeResult()
-            }
+            self?.finalizeResult()
         }
     }
 

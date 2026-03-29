@@ -33,14 +33,17 @@ struct VoiceInputView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
 
             // Record button
+            // NOTE: Call BackgroundAudioManager directly — do NOT route through Darwin
+            // Notification IPC here. This view is in the same process as BackgroundAudioManager,
+            // and the async Darwin roundtrip was causing a race condition with SilenceDetector.
             Button {
                 if audioManager.isRecording {
-                    VoiceKeyContract.sendCommand(.stopRecording)
+                    audioManager.stopRecording()
                 } else {
                     if !audioManager.isActivated {
                         audioManager.activate()
                     }
-                    VoiceKeyContract.sendCommand(.startRecording)
+                    audioManager.startRecording()
                 }
             } label: {
                 Image(systemName: audioManager.isRecording ? "stop.circle.fill" : "mic.circle.fill")

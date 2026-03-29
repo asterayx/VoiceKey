@@ -160,6 +160,11 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     }
 
     private func handleError(_ error: Error) {
+        // Guard against double-firing: when the server sends a WebSocket close frame,
+        // both urlSessionWebSocketDelegate.didCloseWith AND the pending receive() call
+        // return an error. The delegate path calls tearDown() first (isConnected = false),
+        // so we ignore the subsequent receive() error here.
+        guard isConnected else { return }
         delegate?.sttProvider(self, didFailWithError: error)
         tearDown()
         delegate?.sttProviderDidDisconnect(self)
