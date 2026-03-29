@@ -89,6 +89,25 @@ enum STTEngine: String, CaseIterable, Identifiable {
         case .deepgram: return false
         }
     }
+
+    /// Available models for this engine.
+    var availableModels: [String] {
+        switch self {
+        case .soniox:
+            return ["soniox_multilingual", "soniox_english"]
+        case .groq:
+            return ["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"]
+        case .cerebras:
+            return ["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"]
+        case .deepgram:
+            return ["nova-3", "nova-2"]
+        }
+    }
+
+    /// Default model for this engine.
+    var defaultModel: String {
+        availableModels.first ?? ""
+    }
 }
 
 // MARK: - Output Style (for future LLM post-processing)
@@ -235,7 +254,12 @@ final class SettingsStore: ObservableObject {
         let styleRaw = suite.string(forKey: Key.outputStyle) ?? OutputStyle.raw.rawValue
         self.outputStyle = OutputStyle(rawValue: styleRaw) ?? .raw
 
-        // STT model
-        self.sttModel = suite.string(forKey: Key.sttModel) ?? ""
+        // STT model — default to engine's first model if empty
+        let savedModel = suite.string(forKey: Key.sttModel) ?? ""
+        if savedModel.isEmpty {
+            self.sttModel = self.sttEngine.defaultModel
+        } else {
+            self.sttModel = savedModel
+        }
     }
 }

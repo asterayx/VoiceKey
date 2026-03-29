@@ -28,6 +28,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
     private let apiKey: String
     private let languageHints: [String]
+    private let model: String
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession?
@@ -38,10 +39,12 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
     init(apiKey: String,
          languageHints: [String] = ["en", "zh"],
-         idleTimeoutSeconds: Double = 30.0) {
+         idleTimeoutSeconds: Double = 30.0,
+         model: String = "soniox_multilingual") {
         self.apiKey = apiKey
         self.languageHints = languageHints
         self.idleTimeoutSeconds = idleTimeoutSeconds
+        self.model = model
         super.init()
     }
 
@@ -100,7 +103,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     private func sendConfig() {
         let config: [String: Any] = [
             "api_key": apiKey,
-            "model": "soniox_multilingual",
+            "model": model,
             "language_hints": languageHints,
             "include_nonfinal": true,
             "enable_endpoint_detection": true

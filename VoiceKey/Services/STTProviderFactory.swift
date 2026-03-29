@@ -28,7 +28,11 @@ enum STTProviderFactory {
         switch engine {
         case .soniox:
             let hints = LanguageManager.sonioxHints(for: languages)
-            return SonioxStreamingService(apiKey: apiKey, languageHints: hints)
+            return SonioxStreamingService(
+                apiKey: apiKey,
+                languageHints: hints,
+                model: model ?? "soniox_multilingual"
+            )
 
         case .groq:
             let lang = LanguageManager.whisperLanguageCode(for: languages)
