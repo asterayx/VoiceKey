@@ -104,16 +104,16 @@ final class BackgroundAudioManager: ObservableObject {
         guard !isActivated else { return }
 
         // Set up audio session once and keep it alive for background residency.
-        // This must happen before any recording starts — especially important
-        // when the keyboard extension triggers recording while we're in background.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .default,
-                                    options: [.defaultToSpeaker, .allowBluetoothA2DP])
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            print("[VoiceKey] Audio session activation failed: \(error)")
-        }
+        activateAudioSession()
+
+        // Listen for audio session interruptions (phone calls, Siri, etc.)
+        // Re-activate the session when the interruption ends.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
 
         isActivated = true
 
@@ -122,6 +122,44 @@ final class BackgroundAudioManager: ObservableObject {
 
         // Reset session state
         VoiceKeyContract.resetSession()
+    }
+
+    private func activateAudioSession() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            try session.setActive(true)
+        } catch {
+            print("[VoiceKey] Audio session activation failed: \(error)")
+        }
+    }
+
+    @objc private func handleAudioInterruption(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+        else { return }
+
+        switch type {
+        case .began:
+            // System interrupted our session (phone call, Siri, etc.)
+            // If recording, stop gracefully.
+            if isRecording {
+                stopRecording()
+            }
+        case .ended:
+            // Interruption ended — re-activate session for background residency.
+            let options = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            if AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume) {
+                activateAudioSession()
+            } else {
+                // Re-activate anyway — we need it for keyboard-triggered recording.
+                activateAudioSession()
+            }
+        @unknown default:
+            break
+        }
     }
 
     // MARK: - Command Listening

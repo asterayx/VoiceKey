@@ -44,21 +44,9 @@ final class AudioCaptureService {
     func startCapture() throws {
         guard !isRunning else { return }
 
-        // Ensure audio session is configured. Category set is idempotent.
-        // setActive may already be true (activated at app startup for background
-        // residency) — that's fine, calling it again is a no-op.
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-        do {
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            // Session may already be active (background residency). If so,
-            // we can still proceed with recording.
-            if session.isOtherAudioPlaying {
-                throw error
-            }
-            // Otherwise swallow — the session is likely already active.
-        }
+        try session.setActive(true)
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
