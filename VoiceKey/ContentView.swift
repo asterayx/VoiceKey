@@ -209,7 +209,7 @@ extension ContentView {
 
         switch engine {
         case .soniox:
-            testSonioxKey(apiKey: apiKey)
+            testAndFetchSonioxModels(apiKey: apiKey)
         case .groq:
             testAndFetchModels(apiKey: apiKey, endpoint: "https://api.groq.com/openai/v1/models", engine: engine)
         case .cerebras:
@@ -219,83 +219,57 @@ extension ContentView {
         }
     }
 
-    /// Test Soniox by opening a WebSocket and sending config.
-    /// If config send succeeds and connection stays open for 2s, the key is valid.
-    /// Soniox doesn't have a REST models endpoint, so use hardcoded list on success.
-    private func testSonioxKey(apiKey: String) {
-        let url = URL(string: "wss://api.soniox.com/transcribe-websocket")!
-        let session = URLSession(configuration: .default)
-        let task = session.webSocketTask(with: url)
-        task.resume()
-
-        let config: [String: Any] = [
-            "api_key": apiKey,
-            "model": settings.sttModel.isEmpty ? "soniox_multilingual" : settings.sttModel,
-            "include_nonfinal": false,
-            "enable_endpoint_detection": true
-        ]
-
-        guard let data = try? JSONSerialization.data(withJSONObject: config),
-              let jsonString = String(data: data, encoding: .utf8) else {
-            apiTestState = .failure("配置序列化失败")
+    /// Test Soniox key and fetch models via REST API: GET https://api.soniox.com/v1/models
+    private func testAndFetchSonioxModels(apiKey: String) {
+        guard let url = URL(string: "https://api.soniox.com/v1/models") else {
+            apiTestState = .failure("无效的 URL")
             return
         }
 
-        var resolved = false
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
 
-        // Listen for server error/close (invalid key triggers immediate close)
-        task.receive { result in
-            guard !resolved else { return }
+        URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
-                switch result {
-                case .success(let message):
-                    // Check if server sent an error JSON
-                    if case .string(let text) = message,
-                       let msgData = text.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: msgData) as? [String: Any],
-                       let errorMsg = json["error"] as? String {
-                        resolved = true
-                        apiTestState = .failure(errorMsg)
-                    } else {
-                        // Valid response — key works
-                        resolved = true
-                        onSonioxTestSuccess()
+                if let error {
+                    apiTestState = .failure("网络错误: \(error.localizedDescription)")
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    apiTestState = .failure("无响应")
+                    return
+                }
+                switch httpResponse.statusCode {
+                case 200:
+                    // Parse Soniox models: { "models": [{ "id": "stt-rt-v4", ... }] }
+                    var models: [String] = []
+                    if let data,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let modelsArray = json["models"] as? [[String: Any]] {
+                        models = modelsArray.compactMap { model -> String? in
+                            guard let id = model["id"] as? String else { return nil }
+                            // Skip aliased (deprecated) models
+                            if let aliased = model["aliased_model_id"] as? String, !aliased.isEmpty {
+                                return nil
+                            }
+                            return id
+                        }.sorted()
                     }
-                    task.cancel(with: .normalClosure, reason: nil)
-                case .failure(let error):
-                    resolved = true
-                    apiTestState = .failure("API Key 无效: \(error.localizedDescription)")
+                    fetchedModels = models.isEmpty ? STTEngine.soniox.fallbackModels : models
+                    if settings.sttModel.isEmpty || !fetchedModels.contains(settings.sttModel) {
+                        settings.sttModel = fetchedModels.first ?? ""
+                    }
+                    apiTestState = .success
+                case 401:
+                    apiTestState = .failure("API Key 无效 (401)")
+                case 403:
+                    apiTestState = .failure("权限不足 (403)")
+                default:
+                    apiTestState = .failure("HTTP \(httpResponse.statusCode)")
                 }
             }
-        }
-
-        // Send config
-        task.send(.string(jsonString)) { error in
-            if let error {
-                guard !resolved else { return }
-                resolved = true
-                DispatchQueue.main.async {
-                    apiTestState = .failure("连接失败: \(error.localizedDescription)")
-                }
-                return
-            }
-
-            // Config sent OK — wait 2s; if no error received, key is valid
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                guard !resolved else { return }
-                resolved = true
-                onSonioxTestSuccess()
-                task.cancel(with: .normalClosure, reason: nil)
-            }
-        }
-    }
-
-    private func onSonioxTestSuccess() {
-        apiTestState = .success
-        fetchedModels = STTEngine.soniox.fallbackModels
-        if settings.sttModel.isEmpty {
-            settings.sttModel = fetchedModels.first ?? ""
-        }
+        }.resume()
     }
 
     /// Test key via /models endpoint, then parse available models.

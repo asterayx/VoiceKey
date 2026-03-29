@@ -14,6 +14,7 @@
 //    results to App Group UserDefaults.
 //
 
+import AVFoundation
 import Combine
 import SwiftUI
 
@@ -145,6 +146,28 @@ final class BackgroundAudioManager: ObservableObject {
         // Ensure audio session is active
         if !isActivated { activate() }
 
+        // Check microphone permission
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted:
+            performStartRecording(settings: settings, apiKey: apiKey)
+        case .undetermined:
+            AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self?.performStartRecording(settings: settings, apiKey: apiKey)
+                    } else {
+                        VoiceKeyContract.setError("麦克风权限被拒绝，请在「设置」中开启")
+                    }
+                }
+            }
+        case .denied:
+            VoiceKeyContract.setError("麦克风权限被拒绝，请在「设置 → VoiceKey」中开启")
+        @unknown default:
+            VoiceKeyContract.setError("无法确定麦克风权限状态")
+        }
+    }
+
+    private func performStartRecording(settings: SettingsStore, apiKey: String) {
         committedText = ""
         partialText = ""
 

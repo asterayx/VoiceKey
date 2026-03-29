@@ -56,7 +56,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         let config = URLSessionConfiguration.default
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
 
-        guard let url = URL(string: "wss://api.soniox.com/transcribe-websocket") else { return }
+        guard let url = URL(string: "wss://stt-rt.soniox.com/transcribe-websocket") else { return }
         webSocketTask = urlSession?.webSocketTask(with: url)
         webSocketTask?.resume()
 
