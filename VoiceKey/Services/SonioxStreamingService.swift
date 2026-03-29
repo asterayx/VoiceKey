@@ -37,9 +37,14 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     private var idleTimer: Timer?
     private var idleTimeoutSeconds: Double
 
-    /// Prevents double error reporting. Once an error is reported via
-    /// didFailWithError, subsequent errors (e.g. from pending receive) are ignored.
-    private var hasErrored = false
+    /// Once true, no more delegate callbacks will fire. Set by whichever
+    /// terminal event fires first (handleError or didCloseWith).
+    private var isTerminated = false
+
+    /// Set by finishAudio(). When true, a subsequent receive error is expected
+    /// (server closing after end-of-audio) and treated as a clean disconnect
+    /// rather than an error.
+    private var isFinishing = false
 
     init(apiKey: String,
          languageHints: [String] = ["en", "zh"],
@@ -56,7 +61,8 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
     func connect() {
         guard !isConnected else { return }
-        hasErrored = false
+        isTerminated = false
+        isFinishing = false
 
         let config = URLSessionConfiguration.default
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
@@ -72,6 +78,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     func disconnect() {
         idleTimer?.invalidate()
         idleTimer = nil
+        isTerminated = true
         guard webSocketTask != nil else { return }
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         tearDown()
@@ -87,6 +94,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
     func finishAudio() {
         guard isConnected else { return }
+        isFinishing = true
         idleTimer?.invalidate()
         idleTimer = nil
         webSocketTask?.send(.data(Data())) { [weak self] error in
@@ -124,8 +132,6 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         webSocketTask?.send(.string(jsonString)) { [weak self] error in
             guard let self else { return }
             if let error {
-                // Config send failed — report immediately (isConnected is still false,
-                // but hasErrored guard allows this through unlike the old isConnected guard).
                 self.handleError(error)
             } else {
                 self.isConnected = true
@@ -167,15 +173,20 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         }
     }
 
-    /// Handle errors from send/receive failures.
-    /// Uses hasErrored flag (not isConnected) so errors during connection setup
-    /// are properly reported. Only fires didFailWithError — does NOT fire
-    /// sttProviderDidDisconnect (error IS the terminal event for error paths).
+    /// Terminal event for errors (send/receive failures).
+    /// After finishAudio(), receive errors are expected (server closing the
+    /// connection) and are treated as clean disconnects, not errors.
     private func handleError(_ error: Error) {
-        guard !hasErrored else { return }
-        hasErrored = true
+        guard !isTerminated else { return }
+        isTerminated = true
         tearDown()
-        delegate?.sttProvider(self, didFailWithError: error)
+        if isFinishing {
+            // Expected: server closed after receiving end-of-audio signal.
+            delegate?.sttProviderDidDisconnect(self)
+        } else {
+            // Unexpected: real error during recording or connection setup.
+            delegate?.sttProvider(self, didFailWithError: error)
+        }
     }
 
     private func tearDown() {
@@ -192,8 +203,8 @@ extension SonioxStreamingService: URLSessionWebSocketDelegate {
                     webSocketTask: URLSessionWebSocketTask,
                     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
                     reason: Data?) {
-        // If we already reported an error, don't also fire disconnect.
-        guard !hasErrored else { return }
+        guard !isTerminated else { return }
+        isTerminated = true
         tearDown()
         delegate?.sttProviderDidDisconnect(self)
     }

@@ -46,10 +46,11 @@ struct VoiceInputView: View {
                     audioManager.startRecording()
                 }
             } label: {
-                Image(systemName: audioManager.isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                Image(systemName: buttonIcon)
                     .font(.system(size: 72))
-                    .foregroundStyle(audioManager.isRecording ? .red : .blue)
+                    .foregroundStyle(buttonColor)
             }
+            .disabled(audioManager.isProcessing)
 
             if audioManager.isActivated {
                 Label("后台音频已激活，可返回其他 App 使用键盘录音", systemImage: "checkmark.circle.fill")
@@ -65,6 +66,18 @@ struct VoiceInputView: View {
         .padding()
         .navigationTitle("语音输入")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var buttonIcon: String {
+        if audioManager.isProcessing { return "hourglass.circle.fill" }
+        if audioManager.isRecording { return "stop.circle.fill" }
+        return "mic.circle.fill"
+    }
+
+    private var buttonColor: Color {
+        if audioManager.isProcessing { return .gray }
+        if audioManager.isRecording { return .red }
+        return .blue
     }
 
     /// Display text driven by @Published audioManager.displayText.

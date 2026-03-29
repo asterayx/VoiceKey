@@ -71,6 +71,7 @@ final class BackgroundAudioManager: ObservableObject {
 
     @Published var isActivated = false
     @Published var isRecording = false
+    @Published var isProcessing = false
 
     /// Published text for VoiceInputView to observe reactively.
     /// Updated on every partial/final token from STT.
@@ -185,6 +186,7 @@ final class BackgroundAudioManager: ObservableObject {
         partialText = ""
         hasFinalized = false
         isInErrorState = false
+        isProcessing = false
         displayText = ""
 
         // Create STT provider
@@ -238,6 +240,7 @@ final class BackgroundAudioManager: ObservableObject {
     func stopRecording() {
         guard isRecording else { return }
         isRecording = false
+        isProcessing = true
 
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -270,6 +273,7 @@ final class BackgroundAudioManager: ObservableObject {
         sttProvider?.disconnect()
         sttProvider = nil
         isRecording = false
+        isProcessing = false
         committedText = ""
         partialText = ""
         displayText = ""
@@ -284,6 +288,7 @@ final class BackgroundAudioManager: ObservableObject {
         // Don't overwrite error state — the error message is more useful than idle/done.
         guard !hasFinalized, !isInErrorState else { return }
         hasFinalized = true
+        isProcessing = false
 
         let fullText = committedText + partialText
         guard !fullText.isEmpty else {
@@ -301,6 +306,7 @@ final class BackgroundAudioManager: ObservableObject {
     private func handleRecordingError(_ message: String) {
         isInErrorState = true
         isRecording = false
+        isProcessing = false
         audioService.stopCapture()
         sttProvider?.delegate = nil
         sttProvider?.disconnect()
