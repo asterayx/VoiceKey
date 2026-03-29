@@ -91,6 +91,10 @@ final class BackgroundAudioManager: ObservableObject {
     /// overwriting the error with idle/done status.
     private var isInErrorState = false
 
+    /// After finishAudio(), this timer fires when no new tokens arrive for 1.5s.
+    /// Resets on each incoming token so we don't cut off slow-arriving results.
+    private var drainTimer: Timer?
+
     private init() {}
 
     // MARK: - Activation
@@ -182,6 +186,8 @@ final class BackgroundAudioManager: ObservableObject {
             sttProvider = nil
         }
 
+        drainTimer?.invalidate()
+        drainTimer = nil
         committedText = ""
         partialText = ""
         hasFinalized = false
@@ -253,13 +259,11 @@ final class BackgroundAudioManager: ObservableObject {
             sttProvider?.finishAudio()
             audioService.stopCapture()
             VoiceKeyContract.setStatus(.processing)
-            // Primary finalization happens via sttProviderDidDisconnect when Soniox
-            // closes the WebSocket after sending all remaining tokens.
-            // This timer is a safety net only — if the server never closes,
-            // finalize after 10s with whatever text we have.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
-                self?.finalizeResult()
-            }
+            // Start drain timer: finalize once no new tokens arrive for 1.5s.
+            // If Soniox closes the WebSocket, sttProviderDidDisconnect finalizes
+            // immediately. The drain timer handles the case where Soniox keeps
+            // the connection open after delivering all tokens.
+            startDrainTimer()
         } else {
             audioService.stopCapture()
             sttProvider?.finishAudio()
@@ -268,6 +272,8 @@ final class BackgroundAudioManager: ObservableObject {
     }
 
     private func cancelRecording() {
+        drainTimer?.invalidate()
+        drainTimer = nil
         audioService.stopCapture()
         sttProvider?.delegate = nil
         sttProvider?.disconnect()
@@ -285,6 +291,8 @@ final class BackgroundAudioManager: ObservableObject {
     }
 
     private func finalizeResult() {
+        drainTimer?.invalidate()
+        drainTimer = nil
         // Don't overwrite error state — the error message is more useful than idle/done.
         guard !hasFinalized, !isInErrorState else { return }
         hasFinalized = true
@@ -302,8 +310,20 @@ final class BackgroundAudioManager: ObservableObject {
         sttProvider = nil
     }
 
+    /// Start or restart the drain timer. Each incoming token resets the timer.
+    /// When 1.5s passes with no new tokens, we assume Soniox is done and finalize.
+    private func startDrainTimer() {
+        drainTimer?.invalidate()
+        drainTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            self?.drainTimer = nil
+            self?.finalizeResult()
+        }
+    }
+
     /// Clean up everything after an error. Stops audio, nils provider, sets error state.
     private func handleRecordingError(_ message: String) {
+        drainTimer?.invalidate()
+        drainTimer = nil
         isInErrorState = true
         isRecording = false
         isProcessing = false
@@ -390,6 +410,8 @@ extension BackgroundAudioManager: STTProviderDelegate {
             let combined = self.committedText + text
             VoiceKeyContract.setPartialText(combined)
             self.displayText = combined
+            // Reset drain timer — more tokens are still arriving
+            if self.drainTimer != nil { self.startDrainTimer() }
         }
     }
 
@@ -405,6 +427,8 @@ extension BackgroundAudioManager: STTProviderDelegate {
             } else {
                 VoiceKeyContract.setPartialText(self.committedText)
                 self.displayText = self.committedText
+                // Reset drain timer — more tokens are still arriving
+                if self.drainTimer != nil { self.startDrainTimer() }
             }
         }
     }
