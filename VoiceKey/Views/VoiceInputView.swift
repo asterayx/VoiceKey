@@ -67,17 +67,21 @@ struct VoiceInputView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
+    /// Display text driven by @Published audioManager.displayText.
+    /// Falls back to VoiceKeyContract for done/error states (cross-process results).
     private var displayText: String {
         let status = VoiceKeyContract.currentStatus()
         switch status {
         case .done:
-            return VoiceKeyContract.currentResult()
+            return audioManager.displayText.isEmpty
+                ? VoiceKeyContract.currentResult()
+                : audioManager.displayText
         case .recording, .processing:
-            return VoiceKeyContract.currentPartialText()
+            return audioManager.displayText
         case .error:
             return ""
         case .idle:
-            return ""
+            return audioManager.displayText
         }
     }
 

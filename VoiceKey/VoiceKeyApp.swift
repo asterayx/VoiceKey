@@ -72,6 +72,10 @@ final class BackgroundAudioManager: ObservableObject {
     @Published var isActivated = false
     @Published var isRecording = false
 
+    /// Published text for VoiceInputView to observe reactively.
+    /// Updated on every partial/final token from STT.
+    @Published var displayText = ""
+
     private let audioService = AudioCaptureService()
     private var sttProvider: (any StreamingSTTProvider)?
     private var heartbeatTimer: Timer?
@@ -81,6 +85,10 @@ final class BackgroundAudioManager: ObservableObject {
     private var committedText = ""
     private var partialText = ""
     private var hasFinalized = false
+
+    /// Tracks whether we're in an error state — prevents finalizeResult from
+    /// overwriting the error with idle/done status.
+    private var isInErrorState = false
 
     private init() {}
 
@@ -176,6 +184,8 @@ final class BackgroundAudioManager: ObservableObject {
         committedText = ""
         partialText = ""
         hasFinalized = false
+        isInErrorState = false
+        displayText = ""
 
         // Create STT provider
         let provider = STTProviderFactory.makeProvider(
@@ -192,22 +202,32 @@ final class BackgroundAudioManager: ObservableObject {
 
         provider.delegate = self
         sttProvider = provider
-        provider.connect()
 
-        audioService.delegate = self
-        audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
-
-        do {
-            try audioService.startCapture()
-        } catch {
-            VoiceKeyContract.setError("麦克风启动失败: \(error.localizedDescription)")
-            provider.disconnect()
-            sttProvider = nil
-            return
+        // For streaming providers: connect WebSocket first, start audio in
+        // sttProviderDidConnect callback. This ensures no audio frames are
+        // sent before the WebSocket is ready.
+        //
+        // For REST providers: start audio immediately (they buffer locally).
+        if settings.sttEngine.supportsStreaming {
+            VoiceKeyContract.setStatus(.recording)
+            isRecording = true
+            provider.connect()
+            // Audio capture starts in sttProviderDidConnect()
+        } else {
+            audioService.delegate = self
+            audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
+            do {
+                try audioService.startCapture()
+            } catch {
+                VoiceKeyContract.setError("麦克风启动失败: \(error.localizedDescription)")
+                provider.disconnect()
+                sttProvider = nil
+                return
+            }
+            isRecording = true
+            VoiceKeyContract.setStatus(.recording)
+            provider.connect()
         }
-
-        isRecording = true
-        VoiceKeyContract.setStatus(.recording)
 
         // Keep screen on while recording in foreground
         DispatchQueue.main.async {
@@ -232,7 +252,7 @@ final class BackgroundAudioManager: ObservableObject {
             VoiceKeyContract.setStatus(.processing)
             // Primary finalization happens via sttProviderDidDisconnect when Soniox
             // closes the WebSocket after sending all remaining tokens.
-            // This timer is a safety net only — if the server never closes the connection,
+            // This timer is a safety net only — if the server never closes,
             // finalize after 10s with whatever text we have.
             DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self] in
                 self?.finalizeResult()
@@ -246,11 +266,13 @@ final class BackgroundAudioManager: ObservableObject {
 
     private func cancelRecording() {
         audioService.stopCapture()
+        sttProvider?.delegate = nil
         sttProvider?.disconnect()
         sttProvider = nil
         isRecording = false
         committedText = ""
         partialText = ""
+        displayText = ""
         VoiceKeyContract.resetSession()
 
         DispatchQueue.main.async {
@@ -259,7 +281,8 @@ final class BackgroundAudioManager: ObservableObject {
     }
 
     private func finalizeResult() {
-        guard !hasFinalized else { return }
+        // Don't overwrite error state — the error message is more useful than idle/done.
+        guard !hasFinalized, !isInErrorState else { return }
         hasFinalized = true
 
         let fullText = committedText + partialText
@@ -268,8 +291,25 @@ final class BackgroundAudioManager: ObservableObject {
             return
         }
         VoiceKeyContract.setResult(fullText)
+        displayText = fullText
+        sttProvider?.delegate = nil
         sttProvider?.disconnect()
         sttProvider = nil
+    }
+
+    /// Clean up everything after an error. Stops audio, nils provider, sets error state.
+    private func handleRecordingError(_ message: String) {
+        isInErrorState = true
+        isRecording = false
+        audioService.stopCapture()
+        sttProvider?.delegate = nil
+        sttProvider?.disconnect()
+        sttProvider = nil
+        VoiceKeyContract.setError(message)
+
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 
     // MARK: - Heartbeat
@@ -297,8 +337,7 @@ extension BackgroundAudioManager: AudioCaptureDelegate {
 
     func audioCaptureService(_ service: AudioCaptureService, didFailWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
-            VoiceKeyContract.setError("录音错误: \(error.localizedDescription)")
-            self?.isRecording = false
+            self?.handleRecordingError("录音错误: \(error.localizedDescription)")
         }
     }
 
@@ -314,9 +353,25 @@ extension BackgroundAudioManager: AudioCaptureDelegate {
 // MARK: - STTProviderDelegate
 
 extension BackgroundAudioManager: STTProviderDelegate {
-    func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {}
+    func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {
+        // WebSocket is now ready — start audio capture.
+        // This is only reached for streaming providers (Soniox).
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRecording else { return }
+
+            self.audioService.delegate = self
+            self.audioService.silenceDetector.timeoutSeconds = SettingsStore.shared.silenceTimeoutSeconds
+
+            do {
+                try self.audioService.startCapture()
+            } catch {
+                self.handleRecordingError("麦克风启动失败: \(error.localizedDescription)")
+            }
+        }
+    }
 
     func sttProviderDidDisconnect(_ provider: any StreamingSTTProvider) {
+        // Clean WebSocket close — Soniox finished sending all tokens.
         DispatchQueue.main.async { [weak self] in
             self?.finalizeResult()
         }
@@ -326,7 +381,9 @@ extension BackgroundAudioManager: STTProviderDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.partialText = text
-            VoiceKeyContract.setPartialText(self.committedText + text)
+            let combined = self.committedText + text
+            VoiceKeyContract.setPartialText(combined)
+            self.displayText = combined
         }
     }
 
@@ -341,14 +398,17 @@ extension BackgroundAudioManager: STTProviderDelegate {
                 self.finalizeResult()
             } else {
                 VoiceKeyContract.setPartialText(self.committedText)
+                self.displayText = self.committedText
             }
         }
     }
 
     func sttProvider(_ provider: any StreamingSTTProvider, didFailWithError error: Error) {
+        // Full cleanup: stop audio, nil provider, show error.
+        // handleError in SonioxStreamingService already called tearDown(), so
+        // the provider is in a dead state — just clean up our side.
         DispatchQueue.main.async { [weak self] in
-            self?.isRecording = false
-            VoiceKeyContract.setError(error.localizedDescription)
+            self?.handleRecordingError(error.localizedDescription)
         }
     }
 }

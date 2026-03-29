@@ -8,7 +8,7 @@
 //  Conforms to StreamingSTTProvider for provider-agnostic usage.
 //
 //  Soniox protocol:
-//    1. Connect to wss://api.soniox.com/transcribe-websocket
+//    1. Connect to wss://stt-rt.soniox.com/transcribe-websocket
 //    2. First message: JSON config (includes api_key, model, options)
 //    3. Subsequent messages: binary PCM chunks (16 kHz, Int16, mono)
 //    4. Send empty binary frame to signal end-of-audio
@@ -37,6 +37,10 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     private var idleTimer: Timer?
     private var idleTimeoutSeconds: Double
 
+    /// Prevents double error reporting. Once an error is reported via
+    /// didFailWithError, subsequent errors (e.g. from pending receive) are ignored.
+    private var hasErrored = false
+
     init(apiKey: String,
          languageHints: [String] = ["en", "zh"],
          idleTimeoutSeconds: Double = 30.0,
@@ -52,6 +56,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
 
     func connect() {
         guard !isConnected else { return }
+        hasErrored = false
 
         let config = URLSessionConfiguration.default
         urlSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
@@ -67,6 +72,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     func disconnect() {
         idleTimer?.invalidate()
         idleTimer = nil
+        guard webSocketTask != nil else { return }
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         tearDown()
     }
@@ -118,6 +124,8 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         webSocketTask?.send(.string(jsonString)) { [weak self] error in
             guard let self else { return }
             if let error {
+                // Config send failed — report immediately (isConnected is still false,
+                // but hasErrored guard allows this through unlike the old isConnected guard).
                 self.handleError(error)
             } else {
                 self.isConnected = true
@@ -159,15 +167,15 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
         }
     }
 
+    /// Handle errors from send/receive failures.
+    /// Uses hasErrored flag (not isConnected) so errors during connection setup
+    /// are properly reported. Only fires didFailWithError — does NOT fire
+    /// sttProviderDidDisconnect (error IS the terminal event for error paths).
     private func handleError(_ error: Error) {
-        // Guard against double-firing: when the server sends a WebSocket close frame,
-        // both urlSessionWebSocketDelegate.didCloseWith AND the pending receive() call
-        // return an error. The delegate path calls tearDown() first (isConnected = false),
-        // so we ignore the subsequent receive() error here.
-        guard isConnected else { return }
-        delegate?.sttProvider(self, didFailWithError: error)
+        guard !hasErrored else { return }
+        hasErrored = true
         tearDown()
-        delegate?.sttProviderDidDisconnect(self)
+        delegate?.sttProvider(self, didFailWithError: error)
     }
 
     private func tearDown() {
@@ -184,6 +192,8 @@ extension SonioxStreamingService: URLSessionWebSocketDelegate {
                     webSocketTask: URLSessionWebSocketTask,
                     didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
                     reason: Data?) {
+        // If we already reported an error, don't also fire disconnect.
+        guard !hasErrored else { return }
         tearDown()
         delegate?.sttProviderDidDisconnect(self)
     }
