@@ -147,11 +147,11 @@ final class BackgroundAudioManager: ObservableObject {
         if !isActivated { activate() }
 
         // Check microphone permission
-        switch AVAudioSession.sharedInstance().recordPermission {
+        switch AVAudioApplication.shared.recordPermission {
         case .granted:
             performStartRecording(settings: settings, apiKey: apiKey)
         case .undetermined:
-            AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            AVAudioApplication.requestRecordPermission { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
                         self?.performStartRecording(settings: settings, apiKey: apiKey)
