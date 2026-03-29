@@ -220,6 +220,7 @@ extension ContentView {
     }
 
     /// Test Soniox by opening a WebSocket and sending config.
+    /// If config send succeeds and connection stays open for 2s, the key is valid.
     /// Soniox doesn't have a REST models endpoint, so use hardcoded list on success.
     private func testSonioxKey(apiKey: String) {
         let url = URL(string: "wss://api.soniox.com/transcribe-websocket")!
@@ -240,37 +241,60 @@ extension ContentView {
             return
         }
 
+        var resolved = false
+
+        // Listen for server error/close (invalid key triggers immediate close)
+        task.receive { result in
+            guard !resolved else { return }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let message):
+                    // Check if server sent an error JSON
+                    if case .string(let text) = message,
+                       let msgData = text.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: msgData) as? [String: Any],
+                       let errorMsg = json["error"] as? String {
+                        resolved = true
+                        apiTestState = .failure(errorMsg)
+                    } else {
+                        // Valid response — key works
+                        resolved = true
+                        onSonioxTestSuccess()
+                    }
+                    task.cancel(with: .normalClosure, reason: nil)
+                case .failure(let error):
+                    resolved = true
+                    apiTestState = .failure("API Key 无效: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Send config
         task.send(.string(jsonString)) { error in
             if let error {
+                guard !resolved else { return }
+                resolved = true
                 DispatchQueue.main.async {
                     apiTestState = .failure("连接失败: \(error.localizedDescription)")
                 }
                 return
             }
 
-            task.receive { result in
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success:
-                        apiTestState = .success
-                        // Soniox has no models listing API; use known models
-                        fetchedModels = STTEngine.soniox.fallbackModels
-                        if settings.sttModel.isEmpty {
-                            settings.sttModel = fetchedModels.first ?? ""
-                        }
-                    case .failure(let error):
-                        let msg = error.localizedDescription
-                        if msg.contains("57") || msg.contains("Socket is not connected") {
-                            apiTestState = .failure("API Key 无效或连接被拒绝")
-                        } else {
-                            apiTestState = .failure(msg)
-                        }
-                    }
-                    task.cancel(with: .normalClosure, reason: nil)
-                }
+            // Config sent OK — wait 2s; if no error received, key is valid
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                guard !resolved else { return }
+                resolved = true
+                onSonioxTestSuccess()
+                task.cancel(with: .normalClosure, reason: nil)
             }
+        }
+    }
 
-            task.send(.data(Data())) { _ in }
+    private func onSonioxTestSuccess() {
+        apiTestState = .success
+        fetchedModels = STTEngine.soniox.fallbackModels
+        if settings.sttModel.isEmpty {
+            settings.sttModel = fetchedModels.first ?? ""
         }
     }
 
