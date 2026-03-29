@@ -95,12 +95,6 @@ final class BackgroundAudioManager: ObservableObject {
     /// Resets on each incoming token so we don't cut off slow-arriving results.
     private var drainTimer: Timer?
 
-    /// Audio frames captured before the WebSocket is connected.
-    /// Flushed in sttProviderDidConnect. This lets us start audio capture
-    /// immediately (keeping the app alive in background via UIBackgroundModes: audio)
-    /// without losing any frames while the WebSocket handshake completes.
-    private var preConnectBuffer: [Data] = []
-
     private init() {}
 
     // MARK: - Activation
@@ -267,13 +261,11 @@ final class BackgroundAudioManager: ObservableObject {
 
         provider.delegate = self
         sttProvider = provider
-        preConnectBuffer.removeAll()
 
-        // Start audio capture IMMEDIATELY for all provider types.
-        // For streaming providers, frames captured before the WebSocket connects
-        // are buffered in preConnectBuffer and flushed in sttProviderDidConnect.
-        // Starting audio now (rather than waiting for WebSocket) is critical for
-        // background mode: the active audio engine keeps the app alive via
+        // Start audio capture immediately, then connect WebSocket.
+        // Frames sent before WebSocket is ready are dropped (sendAudio guards
+        // on isConnected). Losing a few frames at the start is acceptable.
+        // Starting audio first keeps the app alive in background via
         // UIBackgroundModes:audio while the WebSocket handshake completes.
         audioService.delegate = self
         audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
@@ -328,7 +320,6 @@ final class BackgroundAudioManager: ObservableObject {
     private func cancelRecording() {
         drainTimer?.invalidate()
         drainTimer = nil
-        preConnectBuffer.removeAll()
         audioService.stopCapture()
         sttProvider?.delegate = nil
         sttProvider?.disconnect()
@@ -379,7 +370,6 @@ final class BackgroundAudioManager: ObservableObject {
     private func handleRecordingError(_ message: String) {
         drainTimer?.invalidate()
         drainTimer = nil
-        preConnectBuffer.removeAll()
         isInErrorState = true
         isRecording = false
         isProcessing = false
@@ -414,12 +404,12 @@ final class BackgroundAudioManager: ObservableObject {
 
 extension BackgroundAudioManager: AudioCaptureDelegate {
     func audioCaptureService(_ service: AudioCaptureService, didCapture pcmData: Data) {
-        if sttProvider?.isConnected == true {
-            sttProvider?.sendAudio(pcmData)
-        } else {
-            // Buffer audio while WebSocket is still connecting.
-            // Will be flushed in sttProviderDidConnect.
-            preConnectBuffer.append(pcmData)
+        // Audio tap fires on the audio render thread.
+        // Dispatch to main for thread-safe access to sttProvider/isConnected.
+        // sendAudio internally guards on isConnected — frames before WebSocket
+        // connects are silently dropped (a few frames lost is acceptable).
+        DispatchQueue.main.async { [weak self] in
+            self?.sttProvider?.sendAudio(pcmData)
         }
     }
 
@@ -442,14 +432,7 @@ extension BackgroundAudioManager: AudioCaptureDelegate {
 
 extension BackgroundAudioManager: STTProviderDelegate {
     func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {
-        // WebSocket is ready — flush any audio captured during connection.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            for data in self.preConnectBuffer {
-                self.sttProvider?.sendAudio(data)
-            }
-            self.preConnectBuffer.removeAll()
-        }
+        // WebSocket ready. Audio is already flowing via audioCaptureService delegate.
     }
 
     func sttProviderDidDisconnect(_ provider: any StreamingSTTProvider) {
