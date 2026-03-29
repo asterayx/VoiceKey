@@ -21,15 +21,21 @@ import SwiftUI
 @main
 struct VoiceKeyApp: App {
     @StateObject private var audioManager = BackgroundAudioManager.shared
-    @State private var showVoiceInput = false
+    @State private var selectedTab = 0
 
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                ContentView()
-                    .navigationDestination(isPresented: $showVoiceInput) {
+            TabView(selection: $selectedTab) {
+                Tab("录音", systemImage: "mic.circle.fill", value: 0) {
+                    NavigationStack {
                         VoiceInputView()
                     }
+                }
+                Tab("设置", systemImage: "gearshape", value: 1) {
+                    NavigationStack {
+                        ContentView()
+                    }
+                }
             }
             .onOpenURL { url in
                 handleURL(url)
@@ -45,19 +51,9 @@ struct VoiceKeyApp: App {
         guard url.scheme == "voicekey" else { return }
 
         switch url.host {
-        case "activate":
-            // Keyboard requested activation — start background audio session
+        case "activate", "record", "command":
             audioManager.activate()
-            // Show voice input UI briefly so user sees confirmation
-            showVoiceInput = true
-        case "record":
-            // Legacy / direct recording request
-            audioManager.activate()
-            showVoiceInput = true
-        case "command":
-            // M7: voice command editing — placeholder
-            audioManager.activate()
-            showVoiceInput = true
+            selectedTab = 0
         default:
             break
         }

@@ -12,7 +12,6 @@ import SwiftUI
 
 struct VoiceInputView: View {
     @ObservedObject private var audioManager = BackgroundAudioManager.shared
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 24) {
