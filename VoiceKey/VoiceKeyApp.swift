@@ -95,6 +95,10 @@ final class BackgroundAudioManager: ObservableObject {
     /// Resets on each incoming token so we don't cut off slow-arriving results.
     private var drainTimer: Timer?
 
+    /// Timeout for WebSocket connection. If sttProviderDidConnect doesn't fire
+    /// within 5s, we abort and show an error instead of hanging forever.
+    private var connectTimer: Timer?
+
     private init() {}
 
     // MARK: - Activation
@@ -239,6 +243,8 @@ final class BackgroundAudioManager: ObservableObject {
 
         drainTimer?.invalidate()
         drainTimer = nil
+        connectTimer?.invalidate()
+        connectTimer = nil
         committedText = ""
         partialText = ""
         hasFinalized = false
@@ -283,6 +289,17 @@ final class BackgroundAudioManager: ObservableObject {
         VoiceKeyContract.setStatus(.recording)
         provider.connect()
 
+        // Connection timeout — if WebSocket doesn't connect within 5s, abort.
+        connectTimer?.invalidate()
+        connectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.connectTimer = nil
+            // Only fire if still recording but provider never connected
+            if self.isRecording, self.sttProvider?.isConnected != true {
+                self.handleRecordingError("STT 服务连接超时，请检查网络")
+            }
+        }
+
         // Keep screen on while recording in foreground
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = true
@@ -320,6 +337,8 @@ final class BackgroundAudioManager: ObservableObject {
     private func cancelRecording() {
         drainTimer?.invalidate()
         drainTimer = nil
+        connectTimer?.invalidate()
+        connectTimer = nil
         audioService.stopCapture()
         sttProvider?.delegate = nil
         sttProvider?.disconnect()
@@ -370,6 +389,8 @@ final class BackgroundAudioManager: ObservableObject {
     private func handleRecordingError(_ message: String) {
         drainTimer?.invalidate()
         drainTimer = nil
+        connectTimer?.invalidate()
+        connectTimer = nil
         isInErrorState = true
         isRecording = false
         isProcessing = false
@@ -433,6 +454,10 @@ extension BackgroundAudioManager: AudioCaptureDelegate {
 extension BackgroundAudioManager: STTProviderDelegate {
     func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {
         // WebSocket ready. Audio is already flowing via audioCaptureService delegate.
+        DispatchQueue.main.async { [weak self] in
+            self?.connectTimer?.invalidate()
+            self?.connectTimer = nil
+        }
     }
 
     func sttProviderDidDisconnect(_ provider: any StreamingSTTProvider) {

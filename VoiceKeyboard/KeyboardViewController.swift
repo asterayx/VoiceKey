@@ -291,7 +291,13 @@ final class KeyboardViewController: UIInputViewController {
 
         switch status {
         case .idle:
-            break
+            // Reset keyboard state if we were in a recording/processing session.
+            if isRecordingSession || isProcessingSession {
+                isRecordingSession = false
+                isProcessingSession = false
+                keyboardView.micState = .idle
+                hideDraftCanvas()
+            }
 
         case .recording:
             cancelLaunchTimeout()
