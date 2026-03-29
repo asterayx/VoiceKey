@@ -94,7 +94,7 @@ enum STTEngine: String, CaseIterable, Identifiable {
     var fallbackModels: [String] {
         switch self {
         case .soniox:
-            return ["soniox_multilingual", "soniox_english"]
+            return ["stt-rt-v4", "stt-rt-v3"]
         case .groq:
             return ["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"]
         case .cerebras:

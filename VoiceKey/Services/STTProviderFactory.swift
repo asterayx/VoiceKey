@@ -31,7 +31,7 @@ enum STTProviderFactory {
             return SonioxStreamingService(
                 apiKey: apiKey,
                 languageHints: hints,
-                model: model ?? engine.fallbackModels.first ?? "soniox_multilingual"
+                model: model ?? engine.fallbackModels.first ?? "stt-rt-v4"
             )
 
         case .groq:

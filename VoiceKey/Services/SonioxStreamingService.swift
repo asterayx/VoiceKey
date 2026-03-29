@@ -40,7 +40,7 @@ final class SonioxStreamingService: NSObject, StreamingSTTProvider {
     init(apiKey: String,
          languageHints: [String] = ["en", "zh"],
          idleTimeoutSeconds: Double = 30.0,
-         model: String = "soniox_multilingual") {
+         model: String = "stt-rt-v4") {
         self.apiKey = apiKey
         self.languageHints = languageHints
         self.idleTimeoutSeconds = idleTimeoutSeconds
