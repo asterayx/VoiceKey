@@ -167,6 +167,9 @@ final class KeyboardViewController: UIInputViewController {
     private func hideDraftCanvas() {
         draftCanvas.isHidden = true
         draftCanvas.clear()
+        isRecordingSession = false
+        isProcessingSession = false
+        keyboardView.micState = .idle
         stopPolling()
         updateHeight()
     }
@@ -179,6 +182,8 @@ final class KeyboardViewController: UIInputViewController {
 
     /// Whether we are currently in a recording session.
     private var isRecordingSession = false
+    /// Whether we are waiting for processing results (mic button disabled).
+    private var isProcessingSession = false
 
     // MARK: - Recording trigger (IPC or URL Scheme)
 
@@ -187,6 +192,9 @@ final class KeyboardViewController: UIInputViewController {
             showToast("请在「设置 → 键盘 → VoiceKey」开启完全访问权限")
             return
         }
+
+        // Don't allow taps while processing
+        guard !isProcessingSession else { return }
 
         let settings = SettingsStore.shared
         guard !settings.activeAPIKey.isEmpty else {
@@ -211,6 +219,7 @@ final class KeyboardViewController: UIInputViewController {
             // Main app is alive in background — send command via Darwin Notification (no app switch!)
             VoiceKeyContract.sendCommand(.startRecording)
             isRecordingSession = true
+            keyboardView.micState = .recording
         } else {
             // Main app not running — need URL Scheme to activate it
             activateMainApp()
@@ -220,6 +229,8 @@ final class KeyboardViewController: UIInputViewController {
     private func stopRecordingSession() {
         VoiceKeyContract.sendCommand(.stopRecording)
         isRecordingSession = false
+        isProcessingSession = true
+        keyboardView.micState = .processing
         draftCanvas.showProcessing()
     }
 
@@ -284,13 +295,24 @@ final class KeyboardViewController: UIInputViewController {
 
         case .recording:
             cancelLaunchTimeout()
+            isRecordingSession = true
+            isProcessingSession = false
+            keyboardView.micState = .recording
             if draftCanvas.isHidden {
                 showDraftCanvas()
             }
             draftCanvas.showRecording()
+            // Show live partial text during recording
+            let partial = VoiceKeyContract.currentPartialText()
+            if !partial.isEmpty {
+                draftCanvas.showPartial(committed: partial, partial: "")
+            }
 
         case .processing:
             cancelLaunchTimeout()
+            isRecordingSession = false
+            isProcessingSession = true
+            keyboardView.micState = .processing
             draftCanvas.showProcessing()
             // Check for partial text updates
             let partial = VoiceKeyContract.currentPartialText()
@@ -301,14 +323,14 @@ final class KeyboardViewController: UIInputViewController {
         case .done:
             cancelLaunchTimeout()
             isRecordingSession = false
+            isProcessingSession = false
+            keyboardView.micState = .idle
             let timestamp = VoiceKeyContract.currentTimestamp()
             guard timestamp > lastResultTimestamp else { return }
             lastResultTimestamp = timestamp
 
             let result = VoiceKeyContract.currentResult()
             if !result.isEmpty {
-                // TODO: Add user preference for direct-insert vs DraftCanvas mode.
-                // For now, always use DraftCanvas for review before insertion.
                 draftCanvas.showResult(result)
                 if draftCanvas.isHidden {
                     showDraftCanvas()
@@ -318,6 +340,9 @@ final class KeyboardViewController: UIInputViewController {
 
         case .error:
             cancelLaunchTimeout()
+            isRecordingSession = false
+            isProcessingSession = false
+            keyboardView.micState = .idle
             let errorMsg = VoiceKeyContract.currentError()
             draftCanvas.showError(errorMsg.isEmpty ? "录音或识别过程中发生未知错误" : errorMsg)
             stopPolling()

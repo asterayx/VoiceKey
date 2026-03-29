@@ -102,6 +102,19 @@ final class BackgroundAudioManager: ObservableObject {
     /// Activate background audio session. Called from URL Scheme handler.
     func activate() {
         guard !isActivated else { return }
+
+        // Set up audio session once and keep it alive for background residency.
+        // This must happen before any recording starts — especially important
+        // when the keyboard extension triggers recording while we're in background.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .default,
+                                    options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("[VoiceKey] Audio session activation failed: \(error)")
+        }
+
         isActivated = true
 
         // Start heartbeat so keyboard knows we're alive
