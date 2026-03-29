@@ -95,6 +95,12 @@ final class BackgroundAudioManager: ObservableObject {
     /// Resets on each incoming token so we don't cut off slow-arriving results.
     private var drainTimer: Timer?
 
+    /// Audio frames captured before the WebSocket is connected.
+    /// Flushed in sttProviderDidConnect. This lets us start audio capture
+    /// immediately (keeping the app alive in background via UIBackgroundModes: audio)
+    /// without losing any frames while the WebSocket handshake completes.
+    private var preConnectBuffer: [Data] = []
+
     private init() {}
 
     // MARK: - Activation
@@ -261,32 +267,29 @@ final class BackgroundAudioManager: ObservableObject {
 
         provider.delegate = self
         sttProvider = provider
+        preConnectBuffer.removeAll()
 
-        // For streaming providers: connect WebSocket first, start audio in
-        // sttProviderDidConnect callback. This ensures no audio frames are
-        // sent before the WebSocket is ready.
-        //
-        // For REST providers: start audio immediately (they buffer locally).
-        if settings.sttEngine.supportsStreaming {
-            VoiceKeyContract.setStatus(.recording)
-            isRecording = true
-            provider.connect()
-            // Audio capture starts in sttProviderDidConnect()
-        } else {
-            audioService.delegate = self
-            audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
-            do {
-                try audioService.startCapture()
-            } catch {
-                VoiceKeyContract.setError("麦克风启动失败: \(error.localizedDescription)")
-                provider.disconnect()
-                sttProvider = nil
-                return
-            }
-            isRecording = true
-            VoiceKeyContract.setStatus(.recording)
-            provider.connect()
+        // Start audio capture IMMEDIATELY for all provider types.
+        // For streaming providers, frames captured before the WebSocket connects
+        // are buffered in preConnectBuffer and flushed in sttProviderDidConnect.
+        // Starting audio now (rather than waiting for WebSocket) is critical for
+        // background mode: the active audio engine keeps the app alive via
+        // UIBackgroundModes:audio while the WebSocket handshake completes.
+        audioService.delegate = self
+        audioService.silenceDetector.timeoutSeconds = settings.silenceTimeoutSeconds
+
+        do {
+            try audioService.startCapture()
+        } catch {
+            VoiceKeyContract.setError("麦克风启动失败: \(error.localizedDescription)")
+            provider.disconnect()
+            sttProvider = nil
+            return
         }
+
+        isRecording = true
+        VoiceKeyContract.setStatus(.recording)
+        provider.connect()
 
         // Keep screen on while recording in foreground
         DispatchQueue.main.async {
@@ -325,6 +328,7 @@ final class BackgroundAudioManager: ObservableObject {
     private func cancelRecording() {
         drainTimer?.invalidate()
         drainTimer = nil
+        preConnectBuffer.removeAll()
         audioService.stopCapture()
         sttProvider?.delegate = nil
         sttProvider?.disconnect()
@@ -375,6 +379,7 @@ final class BackgroundAudioManager: ObservableObject {
     private func handleRecordingError(_ message: String) {
         drainTimer?.invalidate()
         drainTimer = nil
+        preConnectBuffer.removeAll()
         isInErrorState = true
         isRecording = false
         isProcessing = false
@@ -409,7 +414,13 @@ final class BackgroundAudioManager: ObservableObject {
 
 extension BackgroundAudioManager: AudioCaptureDelegate {
     func audioCaptureService(_ service: AudioCaptureService, didCapture pcmData: Data) {
-        sttProvider?.sendAudio(pcmData)
+        if sttProvider?.isConnected == true {
+            sttProvider?.sendAudio(pcmData)
+        } else {
+            // Buffer audio while WebSocket is still connecting.
+            // Will be flushed in sttProviderDidConnect.
+            preConnectBuffer.append(pcmData)
+        }
     }
 
     func audioCaptureService(_ service: AudioCaptureService, didFailWithError error: Error) {
@@ -431,19 +442,13 @@ extension BackgroundAudioManager: AudioCaptureDelegate {
 
 extension BackgroundAudioManager: STTProviderDelegate {
     func sttProviderDidConnect(_ provider: any StreamingSTTProvider) {
-        // WebSocket is now ready — start audio capture.
-        // This is only reached for streaming providers (Soniox).
+        // WebSocket is ready — flush any audio captured during connection.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isRecording else { return }
-
-            self.audioService.delegate = self
-            self.audioService.silenceDetector.timeoutSeconds = SettingsStore.shared.silenceTimeoutSeconds
-
-            do {
-                try self.audioService.startCapture()
-            } catch {
-                self.handleRecordingError("麦克风启动失败: \(error.localizedDescription)")
+            guard let self else { return }
+            for data in self.preConnectBuffer {
+                self.sttProvider?.sendAudio(data)
             }
+            self.preConnectBuffer.removeAll()
         }
     }
 
