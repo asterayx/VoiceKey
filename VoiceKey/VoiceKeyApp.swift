@@ -34,6 +34,7 @@ struct VoiceKeyApp: App {
                 handleURL(url)
             }
             .onAppear {
+                audioManager.activate()
                 audioManager.startListeningForCommands()
             }
         }

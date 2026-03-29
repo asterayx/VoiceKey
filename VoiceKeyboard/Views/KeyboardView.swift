@@ -390,7 +390,7 @@ final class KeyboardView: UIView {
         let display = (isShifted || isCapsLocked) ? letter.uppercased() : letter
         config.title = display
         config.baseBackgroundColor = .white
-        config.baseForegroundColor = .label
+        config.baseForegroundColor = .black
         config.background.cornerRadius = 5
 
         let btn = UIButton(configuration: config)
@@ -413,7 +413,7 @@ final class KeyboardView: UIView {
         var config = UIButton.Configuration.filled()
         config.title = char
         config.baseBackgroundColor = .white
-        config.baseForegroundColor = .label
+        config.baseForegroundColor = .black
         config.background.cornerRadius = 5
 
         let btn = UIButton(configuration: config)
