@@ -88,7 +88,8 @@ final class AudioCaptureService {
         audioConverter = nil
         isRunning = false
         silenceDetector.reset()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Do NOT deactivate audio session — background audio residency
+        // requires the session to stay active for the main app to remain alive.
         delegate?.audioCaptureServiceDidStop(self)
     }
 

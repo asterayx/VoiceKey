@@ -207,21 +207,25 @@ final class BackgroundAudioManager: ObservableObject {
 
     private func stopRecording() {
         guard isRecording else { return }
-        audioService.stopCapture()
         isRecording = false
 
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = false
         }
 
+        // IMPORTANT: finish STT first (sends end-of-audio signal over WebSocket),
+        // THEN stop audio capture. Reversing this order kills the WebSocket
+        // before finishAudio can send its closing frame.
         if SettingsStore.shared.sttEngine.supportsStreaming {
             sttProvider?.finishAudio()
+            audioService.stopCapture()
             VoiceKeyContract.setStatus(.processing)
             // Give streaming provider a moment to flush final tokens
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 self?.finalizeResult()
             }
         } else {
+            audioService.stopCapture()
             sttProvider?.finishAudio()
             VoiceKeyContract.setStatus(.processing)
         }
